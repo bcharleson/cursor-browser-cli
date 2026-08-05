@@ -268,11 +268,27 @@ function print(data) {
   process.stdout.write(JSON.stringify(data, null, 2) + "\n");
 }
 
+function pkgRoot() {
+  return path.resolve(__dirname, "..");
+}
+
+function runSetup() {
+  const setup = path.join(pkgRoot(), "scripts", "setup.js");
+  if (!fs.existsSync(setup)) {
+    throw new Error(`setup script missing: ${setup}`);
+  }
+  const mod = require(setup);
+  if (typeof mod.main === "function") mod.main();
+}
+
 function usage() {
   console.log(`cursor-browser — CLI for Cursor IDE Browser Tab (cursor-browser-cli)
 
 Usage:
   cursor-browser [--workspace <name|path>] [--port N] <command>
+
+Setup:
+  setup | install      Install Cursor extension + skills (run after npm i -g)
 
 Routing:
   windows              List Cursor windows with a bridge
@@ -303,6 +319,8 @@ Under the hood:
   screenshot [path.png]
 
 Examples:
+  npm install -g cursor-browser-cli
+  cursor-browser setup
   cursor-browser --workspace af-exec-travel open http://localhost:3000
   cursor-browser --workspace af-exec-travel snapshot
   cursor-browser --workspace af-exec-travel click e5
@@ -341,6 +359,16 @@ async function main() {
     process.exit(opts.help ? 0 : 1);
   }
   const [cmd, ...rest] = opts.rest;
+
+  if (cmd === "setup" || cmd === "install") {
+    try {
+      runSetup();
+    } catch (err) {
+      console.error(err.message || err);
+      process.exit(1);
+    }
+    return;
+  }
 
   if (cmd === "windows" || cmd === "list") {
     const instances = listInstances();

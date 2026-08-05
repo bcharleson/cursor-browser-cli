@@ -7,7 +7,10 @@
   "author": "Brandon Charleson",
   "repository": {
     "type": "git",
-    "url": "https://github.com/bcharleson/cursor-browser-cli.git"
+    "url": "git+https://github.com/bcharleson/cursor-browser-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bcharleson/cursor-browser-cli/issues"
   },
   "homepage": "https://github.com/bcharleson/cursor-browser-cli#readme",
   "keywords": [
@@ -23,11 +26,25 @@
     "devtools"
   ],
   "bin": {
-    "cursor-browser": "./cli/cursor-browser"
+    "cursor-browser": "cli/cursor-browser",
+    "cursor-browser-mcp": "mcp/server.mjs"
   },
+  "files": [
+    "cli/",
+    "extension/",
+    "mcp/",
+    "scripts/setup.js",
+    "scripts/install.sh",
+    "skill/",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
-    "install-cli": "./scripts/install.sh",
-    "mcp": "node ./mcp/server.mjs"
+    "setup": "node ./scripts/setup.js",
+    "postinstall": "node ./scripts/setup.js",
+    "install-cli": "node ./scripts/setup.js",
+    "mcp": "node ./mcp/server.mjs",
+    "prepublishOnly": "node -e \"require('fs').accessSync('cli/cursor-browser'); require('fs').accessSync('extension/extension.js'); require('fs').accessSync('mcp/server.mjs');\""
   },
   "engines": {
     "node": ">=18"

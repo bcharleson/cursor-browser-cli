@@ -111,38 +111,58 @@ This project targets one job: **multi-agent access to Cursor’s Browser Tab fro
 ## Requirements
 
 - **Cursor IDE** with Browser Tab / `cursor.browserView.*` APIs available  
-- **Node.js ≥ 18** (CLI + MCP use Node; no production npm dependencies)  
-- macOS / Linux / Windows where Cursor runs (install script paths are Unix-oriented; Windows users can symlink/copy the CLI manually)
+- **Node.js ≥ 18** (CLI + MCP; no production npm dependencies)  
+- macOS / Linux / Windows (where Cursor runs)
 
 ---
 
-## Install
+## Install (recommended: npm)
 
 ```bash
-git clone https://github.com/bcharleson/cursor-browser-cli.git
-cd cursor-browser-cli
-./scripts/install.sh
+npm install -g cursor-browser-cli
 ```
 
-What `install.sh` does:
+That installs:
 
-1. Symlinks `cli/cursor-browser` → `~/.local/bin/cursor-browser`  
-2. Copies the extension into `~/.cursor/extensions/local.cursor-browser-cli-<version>`  
-3. Migrates old extension folder names if present  
-4. Installs skill templates under `~/.grok/skills`, `~/.claude/skills`, `~/.agents/skills` when those roots exist  
-5. Prints MCP registration hints (and registers Grok MCP when `grok` is available)
+| Piece | What you get |
+|-------|----------------|
+| **CLI** | `cursor-browser` on your PATH |
+| **MCP** | `cursor-browser-mcp` on your PATH |
+| **Extension** | Copied into `~/.cursor/extensions/` (via `postinstall`) |
+| **Skills** | Agent skill templates when those skill roots exist |
 
-Then **reload each Cursor window** you care about:
+If the extension step was skipped (e.g. `npm i --ignore-scripts`), run:
+
+```bash
+cursor-browser setup
+```
+
+Then **reload each Cursor window** you use:
 
 `Cmd+Shift+P` (or `Ctrl+Shift+P`) → **Developer: Reload Window**
 
 Confirm the status bar shows something like `your-project :17375`, then:
 
 ```bash
-# Ensure ~/.local/bin is on your PATH
 cursor-browser windows
 cursor-browser --workspace <project-folder> open https://example.com
 cursor-browser --workspace <project-folder> snapshot
+```
+
+### Skip automatic setup
+
+```bash
+CURSOR_BROWSER_SKIP_SETUP=1 npm install -g cursor-browser-cli
+cursor-browser setup   # when ready
+```
+
+### From source (optional)
+
+```bash
+git clone https://github.com/bcharleson/cursor-browser-cli.git
+cd cursor-browser-cli
+npm install          # runs setup
+# or: ./scripts/install.sh
 ```
 
 ### Extension commands (inside Cursor)
@@ -306,17 +326,31 @@ cursor-browser --workspace af-exec-travel open http://localhost:3000
 
 Stdio MCP server for agents that prefer tools over shelling out.
 
+After `npm install -g cursor-browser-cli`, the bin **`cursor-browser-mcp`** is on your PATH.
+
 ### Register
 
 ```bash
 # Grok Build
-grok mcp add cursor-browser -- node /absolute/path/to/cursor-browser-cli/mcp/server.mjs
+grok mcp add cursor-browser -- cursor-browser-mcp
 
 # Claude Code
-claude mcp add cursor-browser -- node /absolute/path/to/cursor-browser-cli/mcp/server.mjs
+claude mcp add cursor-browser -- cursor-browser-mcp
 ```
 
 Any stdio MCP client:
+
+```json
+{
+  "mcpServers": {
+    "cursor-browser": {
+      "command": "cursor-browser-mcp"
+    }
+  }
+}
+```
+
+Fallback (from a clone or if the bin is not on PATH):
 
 ```json
 {
@@ -370,7 +404,7 @@ All tools accept optional **`workspace`** (project folder name or path) unless n
 
 ## Skills
 
-`./scripts/install.sh` copies `skill/SKILL.md` to:
+`npm install -g` / `cursor-browser setup` copies `skill/SKILL.md` to:
 
 - `~/.grok/skills/cursor-browser/SKILL.md`  
 - `~/.claude/skills/cursor-browser/SKILL.md` (if that tree exists)  
@@ -471,7 +505,7 @@ That continuity is the whole point of this tool.
 
 | Symptom | Fix |
 |---------|-----|
-| Connection refused | `./scripts/install.sh`, then **Reload Window**; check status bar for `:port` |
+| Connection refused | `cursor-browser setup` (or reinstall with npm), then **Reload Window**; check status bar for `:port` |
 | Wrong project / wrong app | `cursor-browser windows` then `--workspace <name>` |
 | Stale ref / element not found | New `snapshot` / `open` / `nav`; never reuse refs across big DOM changes |
 | Race / empty or intermediate page | `wait --url` / `--text` / `--ref` / `--selector` with a higher `--timeout` |
@@ -490,7 +524,7 @@ Logs: `~/.cursor-browser-cli/bridge.log`
 cursor-browser-cli/
 ├── README.md
 ├── LICENSE                 # MIT
-├── package.json
+├── package.json            # npm package (bins + postinstall setup)
 ├── cli/
 │   └── cursor-browser      # CLI entry (Node)
 ├── extension/
@@ -498,9 +532,10 @@ cursor-browser-cli/
 │   ├── extension.js        # HTTP API + cursor.browserView.*
 │   └── snapshot.js         # Accessibility snapshot + refs
 ├── mcp/
-│   └── server.mjs          # MCP stdio server
+│   └── server.mjs          # MCP stdio server → bin: cursor-browser-mcp
 ├── scripts/
-│   └── install.sh
+│   ├── setup.js            # extension + skills install
+│   └── install.sh          # thin wrapper → setup.js
 └── skill/
     └── SKILL.md            # Agent skill template
 ```
@@ -514,7 +549,8 @@ cursor-browser-cli/
 - Extension activation: `onStartupFinished`  
 - Preferred port configurable via `cursorBrowserCli.port`  
 - Clients still understand legacy state dirs / names from earlier renames for smoother upgrades  
-- After changing extension code: re-run `./scripts/install.sh` and **Reload Window**
+- After changing extension code: `cursor-browser setup` (or `npm run setup`) and **Reload Window**  
+- Publish: `npm publish` (requires npm login)
 
 ---
 
