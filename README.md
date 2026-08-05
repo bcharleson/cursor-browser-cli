@@ -29,10 +29,8 @@ If you prefer **Claude Code**, **Grok Build**, **Codex**, or scripts in Cursor�
 |----------|-----|
 | Stay in Cursor + terminal agent | **This project** |
 | Cursor’s own Agent browser tools | Built-in (no bridge) |
-| Real Chrome profile / extensions | [Browser MCP](https://browsermcp.io/), [browser-bridge (Chrome)](https://github.com/koltyakov/browser-bridge) |
+| Real Chrome profile / extensions | Browser MCP / Chrome extensions |
 | Headless CI browser | Playwright MCP |
-
-> Prior art: [VectorlyApp/cursor-browser-bridge](https://github.com/VectorlyApp/cursor-browser-bridge) pioneered the same architecture. This repo is an independent implementation with multi-window routing, Grok skill, single-tab defaults, and under-the-hood inspect tools.
 
 ---
 
@@ -344,7 +342,3 @@ MIT — see [LICENSE](./LICENSE).
 
 ---
 
-## Acknowledgments
-
-- Cursor team for the embedded Browser Tab and `browserView` commands  
-- [VectorlyApp/cursor-browser-bridge](https://github.com/VectorlyApp/cursor-browser-bridge) for establishing the extension ↔ MCP bridge pattern  
