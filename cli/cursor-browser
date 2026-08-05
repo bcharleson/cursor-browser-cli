@@ -24,9 +24,73 @@ function readInstances() {
   }
 }
 
+/**
+ * Discover bridges by scanning listeners + Cursor extension-host process names.
+ * Works even before v0.2 instances.json registration (after window reload).
+ * Process title looks like: "extension-host (user) af-exec-travel [3-2]"
+ */
+function discoverInstancesFromProcesses() {
+  const { execSync } = require("child_process");
+  const found = [];
+  try {
+    const lsof = execSync(
+      "lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -E '127\\.0\\.0\\.1:173[0-9]{2}' || true",
+      { encoding: "utf8" }
+    );
+    for (const line of lsof.split("\n")) {
+      if (!line.trim()) continue;
+      const parts = line.trim().split(/\s+/);
+      const pid = Number(parts[1]);
+      const nameField = parts.find((p) => p.includes("127.0.0.1:"));
+      if (!pid || !nameField) continue;
+      const m = nameField.match(/:(\d+)$/);
+      if (!m) continue;
+      const port = Number(m[1]);
+      let primaryName = null;
+      try {
+        const ps = execSync(`ps -p ${pid} -o command= 2>/dev/null || true`, {
+          encoding: "utf8",
+        });
+        // "Cursor Helper (Plugin): extension-host (user) af-exec-travel [3-2]"
+        const mm = ps.match(
+          /extension-host\s+\([^)]+\)\s+([^\s\[]+)/i
+        );
+        if (mm) primaryName = mm[1].trim();
+      } catch {
+        /* ignore */
+      }
+      found.push({
+        id: `discovered-${port}`,
+        port,
+        pid,
+        primaryName,
+        primaryPath: primaryName
+          ? path.join(os.homedir(), "Developer", primaryName)
+          : null,
+        workspaceNames: primaryName ? [primaryName] : [],
+        workspacePaths: primaryName
+          ? [path.join(os.homedir(), "Developer", primaryName)]
+          : [],
+        basenames: primaryName ? [primaryName] : [],
+        discovered: true,
+      });
+    }
+  } catch {
+    /* ignore */
+  }
+  return found;
+}
+
 function listInstances() {
   const map = readInstances();
-  return Object.values(map).sort((a, b) =>
+  const registered = Object.values(map);
+  if (registered.length) {
+    return registered.sort((a, b) =>
+      String(a.primaryName || "").localeCompare(String(b.primaryName || ""))
+    );
+  }
+  // Fallback: live process discovery (multi-window without reload)
+  return discoverInstancesFromProcesses().sort((a, b) =>
     String(a.primaryName || "").localeCompare(String(b.primaryName || ""))
   );
 }
