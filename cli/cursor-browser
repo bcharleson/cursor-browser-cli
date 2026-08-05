@@ -1,0 +1,208 @@
+#!/usr/bin/env node
+/**
+ * cursor-browser — CLI client for Cursor Browser Bridge
+ * Talks to the local extension HTTP API (default 127.0.0.1:17373)
+ */
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const http = require("http");
+
+const STATE_DIR = path.join(os.homedir(), ".cursor-browser-bridge");
+const PORT_FILE = path.join(STATE_DIR, "port");
+const DEFAULT_PORT = 17373;
+
+function resolvePort() {
+  if (process.env.CURSOR_BROWSER_BRIDGE_PORT) {
+    return Number(process.env.CURSOR_BROWSER_BRIDGE_PORT);
+  }
+  try {
+    if (fs.existsSync(PORT_FILE)) {
+      const n = Number(fs.readFileSync(PORT_FILE, "utf8").trim());
+      if (n > 0) return n;
+    }
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_PORT;
+}
+
+function request(method, pathname, body) {
+  const port = resolvePort();
+  const payload = body ? JSON.stringify(body) : null;
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: pathname,
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          ...(payload
+            ? { "Content-Length": Buffer.byteLength(payload) }
+            : {}),
+        },
+        timeout: 30000,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          let data;
+          try {
+            data = raw ? JSON.parse(raw) : {};
+          } catch {
+            data = { ok: false, error: "Non-JSON response", raw };
+          }
+          resolve({ status: res.statusCode, data, port });
+        });
+      }
+    );
+    req.on("error", (err) => {
+      reject(
+        new Error(
+          `Cannot reach Cursor Browser Bridge on 127.0.0.1:${port} (${err.message}).\n` +
+            `Is Cursor open with the cursor-browser-bridge extension installed and activated?`
+        )
+      );
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error(`Timeout talking to bridge on port ${port}`));
+    });
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function action(body) {
+  return request("POST", "/action", body);
+}
+
+function print(data) {
+  if (typeof data === "string") {
+    process.stdout.write(data + (data.endsWith("\n") ? "" : "\n"));
+    return;
+  }
+  process.stdout.write(JSON.stringify(data, null, 2) + "\n");
+}
+
+function usage() {
+  console.log(`cursor-browser — drive Cursor's Browser Tab via the bridge extension
+
+Usage:
+  cursor-browser status
+  cursor-browser probe
+  cursor-browser open <url>
+  cursor-browser nav|navigate <url>
+  cursor-browser tabs
+  cursor-browser url
+  cursor-browser title
+  cursor-browser snap [path.png]
+  cursor-browser eval <js>
+  cursor-browser back | forward | reload
+  cursor-browser select <viewId>
+  cursor-browser cdp <Method> [json-params]
+
+Env:
+  CURSOR_BROWSER_BRIDGE_PORT   override port (default: ~/.cursor-browser-bridge/port or 17373)
+`);
+}
+
+async function main() {
+  const [cmd, ...rest] = process.argv.slice(2);
+  if (!cmd || cmd === "-h" || cmd === "--help" || cmd === "help") {
+    usage();
+    process.exit(0);
+  }
+
+  try {
+    let res;
+    switch (cmd) {
+      case "status":
+      case "health":
+        res = await request("GET", "/status");
+        break;
+      case "probe":
+        res = await request("GET", "/probe");
+        break;
+      case "open":
+        if (!rest[0]) throw new Error("url required");
+        res = await action({ action: "open", url: rest[0] });
+        break;
+      case "nav":
+      case "navigate":
+        if (!rest[0]) throw new Error("url required");
+        res = await action({ action: "navigate", url: rest[0] });
+        break;
+      case "tabs":
+        res = await action({ action: "tabs" });
+        break;
+      case "url":
+        res = await action({ action: "url" });
+        break;
+      case "title":
+        res = await action({ action: "title" });
+        break;
+      case "snap":
+      case "screenshot": {
+        const outPath = rest[0] || path.join(os.tmpdir(), "cursor-browser-snap.png");
+        res = await action({ action: "screenshot", path: outPath });
+        if (res.data && res.data.ok !== false) {
+          // If result includes base64, write it
+          const r = res.data.result || res.data;
+          if (r && r.data && typeof r.data === "string") {
+            const buf = Buffer.from(r.data, r.encoding === "base64" || !r.encoding ? "base64" : r.encoding);
+            fs.writeFileSync(outPath, buf);
+            res.data.savedTo = outPath;
+          } else if (r && r.path) {
+            res.data.savedTo = r.path;
+          } else {
+            res.data.note = `Requested screenshot; saved path hint: ${outPath}`;
+            res.data.savedTo = outPath;
+          }
+        }
+        break;
+      }
+      case "eval":
+      case "evaluate":
+        if (!rest[0]) throw new Error("js expression/script required");
+        res = await action({ action: "evaluate", script: rest.join(" ") });
+        break;
+      case "back":
+        res = await action({ action: "back" });
+        break;
+      case "forward":
+        res = await action({ action: "forward" });
+        break;
+      case "reload":
+        res = await action({ action: "reload" });
+        break;
+      case "select":
+        if (!rest[0]) throw new Error("viewId required");
+        res = await action({ action: "select", viewId: rest[0] });
+        break;
+      case "cdp": {
+        if (!rest[0]) throw new Error("CDP method required");
+        const method = rest[0];
+        let params = {};
+        if (rest[1]) params = JSON.parse(rest.slice(1).join(" "));
+        res = await action({ action: "cdp", method, params });
+        break;
+      }
+      default:
+        usage();
+        process.exit(1);
+    }
+
+    print(res.data !== undefined ? res.data : res);
+    if (res.data && res.data.ok === false) process.exit(2);
+  } catch (err) {
+    console.error(err.message || err);
+    process.exit(1);
+  }
+}
+
+main();

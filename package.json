@@ -1,0 +1,31 @@
+{
+  "name": "cursor-browser-bridge",
+  "version": "0.1.0",
+  "description": "Drive Cursor's built-in Browser Tab from Grok Build / CLI / MCP (not chrome-cdp)",
+  "private": false,
+  "license": "MIT",
+  "author": "Brandon Charleson",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/brandoncharleson/cursor-browser-bridge.git"
+  },
+  "keywords": [
+    "cursor",
+    "browser",
+    "mcp",
+    "grok",
+    "automation",
+    "devtools",
+    "ide"
+  ],
+  "bin": {
+    "cursor-browser": "./cli/cursor-browser"
+  },
+  "scripts": {
+    "install-bridge": "./scripts/install.sh",
+    "mcp": "node ./mcp/server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

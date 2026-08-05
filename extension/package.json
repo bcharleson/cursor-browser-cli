@@ -1,0 +1,42 @@
+{
+  "name": "cursor-browser-bridge",
+  "displayName": "Cursor Browser Bridge",
+  "description": "Expose Cursor Browser Tab controls to Grok Build / CLI over localhost HTTP",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cursorBrowserBridge.status",
+        "title": "Cursor Browser Bridge: Show Status"
+      },
+      {
+        "command": "cursorBrowserBridge.restart",
+        "title": "Cursor Browser Bridge: Restart Server"
+      }
+    ],
+    "configuration": {
+      "title": "Cursor Browser Bridge",
+      "properties": {
+        "cursorBrowserBridge.port": {
+          "type": "number",
+          "default": 17373,
+          "description": "Localhost HTTP port for the bridge API"
+        },
+        "cursorBrowserBridge.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the bridge HTTP server on activation"
+        }
+      }
+    }
+  }
+}
