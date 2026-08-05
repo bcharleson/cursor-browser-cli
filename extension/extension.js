@@ -136,16 +136,57 @@ async function tryShapes(command, shapes) {
   return { ok: false, error: "All arg shapes failed", command, errors };
 }
 
-async function ensureBrowserOpen(url) {
-  // Open browser IN THIS window only (commands run in this extension host)
+function tabIdsFromList(tabsResult) {
+  if (!tabsResult) return [];
+  const r = tabsResult.result !== undefined ? tabsResult.result : tabsResult;
+  if (!r) return [];
+  if (Array.isArray(r.tabs)) return r.tabs.filter(Boolean);
+  if (Array.isArray(r)) return r.filter(Boolean);
+  return [];
+}
+
+/**
+ * Prefer a single tab: if any tab exists, select it and navigate.
+ * Only create a new tab when the window has zero browser tabs.
+ */
+async function ensureBrowserOpen(url, opts = {}) {
+  const forceNew = !!opts.newTab;
+  const tabsRes = await listTabs();
+  const ids = tabIdsFromList(tabsRes);
+
+  if (!forceNew && ids.length > 0) {
+    const viewId = ids[0];
+    // Close extras so we stay single-tab
+    for (const extra of ids.slice(1)) {
+      await closeTab(extra);
+    }
+    await selectTab(viewId);
+    if (url) {
+      const nav = await navigate(url, viewId);
+      return {
+        ok: nav.ok !== false,
+        result: {
+          reusedTab: true,
+          viewId,
+          closedExtras: ids.slice(1),
+          navigate: nav,
+        },
+        error: nav.error,
+      };
+    }
+    return {
+      ok: true,
+      result: { reusedTab: true, viewId, closedExtras: ids.slice(1) },
+    };
+  }
+
+  // No tab yet — open browser surface once (avoid stacking newTab calls)
   const openAttempts = [
     ["workbench.action.focusOrOpenBrowserEditor"],
     ["workbench.action.openBrowserEditor"],
-    ["workbench.action.newBrowserTab"],
     ["composer.openBrowserTab"],
     ["glass.openBrowserTab", url ? { url } : undefined],
     ["cursor.browserView.newTab", url],
-    ["cursor.browserView.newTab", url, { preserveFocus: false }],
   ];
   for (const [id, ...args] of openAttempts) {
     const filtered = args.filter((a) => a !== undefined);
@@ -155,12 +196,173 @@ async function ensureBrowserOpen(url) {
       break;
     }
   }
+  await new Promise((r) => setTimeout(r, 250));
   if (url) {
-    // Small delay so the view exists
-    await new Promise((r) => setTimeout(r, 150));
-    return navigate(url);
+    const nav = await navigate(url);
+    return {
+      ok: nav.ok !== false,
+      result: { reusedTab: false, created: true, navigate: nav },
+      error: nav.error,
+    };
   }
-  return { ok: true, result: { opened: true, workspace: workspaceInfo() } };
+  return {
+    ok: true,
+    result: { opened: true, created: true, workspace: workspaceInfo() },
+  };
+}
+
+async function closeTab(viewId) {
+  return tryShapes("cursor.browserView.closeTab", [
+    [viewId],
+    [viewId, {}],
+    [{ viewId }],
+  ]);
+}
+
+/**
+ * Click an element by CSS selector (JS) or at x,y (CDP mouse).
+ */
+async function click(opts = {}) {
+  const viewId = opts.viewId;
+  if (opts.selector) {
+    const script = `
+      (function() {
+        const el = document.querySelector(${JSON.stringify(opts.selector)});
+        if (!el) return { ok: false, error: "selector not found: ${String(opts.selector).replace(/"/g, '\\"')}" };
+        el.scrollIntoView({ block: "center", inline: "center" });
+        const r = el.getBoundingClientRect();
+        el.focus({ preventScroll: true });
+        el.click();
+        return {
+          ok: true,
+          tag: el.tagName,
+          text: (el.innerText || el.value || "").slice(0, 80),
+          box: { x: r.x, y: r.y, w: r.width, h: r.height }
+        };
+      })()
+    `;
+    const res = await executeJavaScript(script, viewId);
+    return res;
+  }
+  if (opts.x != null && opts.y != null) {
+    const x = Number(opts.x);
+    const y = Number(opts.y);
+    await sendCDP(
+      "Input.dispatchMouseEvent",
+      { type: "mousePressed", x, y, button: "left", clickCount: 1 },
+      viewId
+    );
+    const up = await sendCDP(
+      "Input.dispatchMouseEvent",
+      { type: "mouseReleased", x, y, button: "left", clickCount: 1 },
+      viewId
+    );
+    return { ok: true, result: { clicked: { x, y }, cdp: up } };
+  }
+  return { ok: false, error: "click requires selector or x,y" };
+}
+
+/**
+ * Type text into focused field or selector. clear=true selects-all then types.
+ */
+async function typeText(opts = {}) {
+  const viewId = opts.viewId;
+  const text = opts.text != null ? String(opts.text) : "";
+  const selector = opts.selector;
+  const clear = opts.clear !== false; // default clear when selector given
+
+  if (selector) {
+    const script = `
+      (function() {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return { ok: false, error: "selector not found" };
+        el.scrollIntoView({ block: "center", inline: "center" });
+        el.focus({ preventScroll: true });
+        const isInput = "value" in el;
+        if (${clear ? "true" : "false"}) {
+          if (isInput) {
+            el.value = "";
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+          } else if (el.isContentEditable) {
+            el.textContent = "";
+          }
+        }
+        if (isInput) {
+          el.value = ${JSON.stringify(text)};
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        } else if (el.isContentEditable) {
+          el.textContent = ${JSON.stringify(text)};
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+        } else {
+          return { ok: false, error: "element is not typeable" };
+        }
+        return { ok: true, value: isInput ? el.value : el.textContent };
+      })()
+    `;
+    const res = await executeJavaScript(script, viewId);
+    // Also insert via CDP for sites that ignore value sets (e.g. React controlled)
+    if (opts.cdp || opts.useCdp) {
+      if (clear) {
+        await sendCDP(
+          "Input.dispatchKeyEvent",
+          { type: "keyDown", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65 },
+          viewId
+        );
+        await sendCDP(
+          "Input.dispatchKeyEvent",
+          { type: "keyUp", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65 },
+          viewId
+        );
+      }
+      await sendCDP("Input.insertText", { text }, viewId);
+    }
+    return res;
+  }
+
+  // No selector: insert into current focus
+  if (clear) {
+    await sendCDP(
+      "Input.dispatchKeyEvent",
+      {
+        type: "keyDown",
+        modifiers: 4, // meta on mac often 4; try both via JS select
+        key: "a",
+        code: "KeyA",
+        windowsVirtualKeyCode: 65,
+      },
+      viewId
+    );
+  }
+  const ins = await sendCDP("Input.insertText", { text }, viewId);
+  return { ok: true, result: ins };
+}
+
+async function pressKey(key, viewId) {
+  // Electron blocks CDP Input.* — use DOM events / form submit instead.
+  const script = `
+    (function() {
+      const key = ${JSON.stringify(key)};
+      const el = document.activeElement || document.body;
+      const opts = { key, code: key, keyCode: key === "Enter" ? 13 : key === "Tab" ? 9 : key === "Escape" ? 27 : 0, which: key === "Enter" ? 13 : 0, bubbles: true, cancelable: true };
+      el.dispatchEvent(new KeyboardEvent("keydown", opts));
+      el.dispatchEvent(new KeyboardEvent("keypress", opts));
+      el.dispatchEvent(new KeyboardEvent("keyup", opts));
+      if (key === "Enter") {
+        const form = el.form || el.closest && el.closest("form");
+        if (form) {
+          if (typeof form.requestSubmit === "function") form.requestSubmit();
+          else form.submit();
+          return { ok: true, submitted: true, tag: el.tagName };
+        }
+        // Google: click the search button if present
+        const btn = document.querySelector("input[name=btnK], button[type=submit], input[type=submit]");
+        if (btn) { btn.click(); return { ok: true, clickedSubmit: true }; }
+      }
+      return { ok: true, dispatched: key, tag: el.tagName };
+    })()
+  `;
+  return executeJavaScript(script, viewId);
 }
 
 async function navigate(url, viewId) {
@@ -282,7 +484,8 @@ async function handleAction(body) {
     case "workspace":
       return instancePayload();
     case "open":
-      return ensureBrowserOpen(url);
+      // Single-tab by default; body.newTab=true forces another tab
+      return ensureBrowserOpen(url, { newTab: !!body.newTab });
     case "navigate":
     case "nav":
       if (!url) return { ok: false, error: "url required" };
@@ -290,6 +493,23 @@ async function handleAction(body) {
     case "tabs":
     case "listTabs":
       return listTabs();
+    case "close":
+    case "closeTab": {
+      if (viewId) return closeTab(viewId);
+      // close all but first
+      const tabsRes = await listTabs();
+      const ids = tabIdsFromList(tabsRes);
+      if (ids.length <= 1) {
+        return { ok: true, result: { closed: [], kept: ids[0] || null } };
+      }
+      const closed = [];
+      for (const id of ids.slice(1)) {
+        await closeTab(id);
+        closed.push(id);
+      }
+      await selectTab(ids[0]);
+      return { ok: true, result: { closed, kept: ids[0] } };
+    }
     case "url":
     case "getURL":
       return getURL(viewId);
@@ -305,6 +525,26 @@ async function handleAction(body) {
         ref: body.ref || body.element,
         path: body.path,
       });
+    case "click":
+      return click({
+        selector: body.selector || body.on,
+        x: body.x,
+        y: body.y,
+        viewId,
+      });
+    case "type":
+    case "fill":
+      return typeText({
+        text: body.text || body.value,
+        selector: body.selector || body.on,
+        clear: body.clear,
+        useCdp: body.useCdp || body.cdp,
+        viewId,
+      });
+    case "press":
+    case "key":
+      if (!body.key) return { ok: false, error: "key required" };
+      return pressKey(body.key, viewId);
     case "evaluate":
     case "eval":
     case "executeJavaScript":
@@ -336,9 +576,13 @@ async function handleAction(body) {
           "open",
           "navigate",
           "tabs",
+          "close",
           "url",
           "title",
           "screenshot",
+          "click",
+          "type",
+          "press",
           "evaluate",
           "cdp",
           "back",

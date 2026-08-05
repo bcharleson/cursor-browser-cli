@@ -464,7 +464,27 @@ async function main() {
         break;
       case "open":
         if (!rest[0]) throw new Error("url required");
-        res = await action({ action: "open", url: rest[0] });
+        // Prefer single-tab: if tabs already exist, navigate instead of open/newTab
+        {
+          const t = await action({ action: "tabs" });
+          const ids =
+            t.data?.result?.tabs ||
+            t.data?.tabs?.tabs ||
+            [];
+          if (Array.isArray(ids) && ids.length > 0) {
+            // close extras when extension supports it
+            if (ids.length > 1) {
+              await action({ action: "close" }).catch(() => null);
+            }
+            res = await action({ action: "navigate", url: rest[0] });
+            if (res.data && typeof res.data === "object") {
+              res.data.reusedTab = true;
+              res.data.viewId = ids[0];
+            }
+          } else {
+            res = await action({ action: "open", url: rest[0] });
+          }
+        }
         break;
       case "nav":
       case "navigate":
@@ -474,6 +494,148 @@ async function main() {
       case "tabs":
         res = await action({ action: "tabs" });
         break;
+      case "close":
+      case "close-extras":
+        // close all but first tab (extension action) or no-op
+        res = await action({
+          action: "close",
+          viewId: rest[0] || undefined,
+        });
+        break;
+      case "click": {
+        // cursor-browser click <selector>
+        // cursor-browser click --xy 100,200
+        if (!rest[0]) throw new Error("selector or --xy x,y required");
+        if (rest[0] === "--xy" || rest[0] === "-xy") {
+          const [x, y] = (rest[1] || "").split(",").map(Number);
+          res = await action({ action: "click", x, y });
+          // Fallback via CDP if extension lacks click
+          if (res.data && res.data.ok === false) {
+            await action({
+              action: "cdp",
+              method: "Input.dispatchMouseEvent",
+              params: {
+                type: "mousePressed",
+                x,
+                y,
+                button: "left",
+                clickCount: 1,
+              },
+            });
+            res = await action({
+              action: "cdp",
+              method: "Input.dispatchMouseEvent",
+              params: {
+                type: "mouseReleased",
+                x,
+                y,
+                button: "left",
+                clickCount: 1,
+              },
+            });
+          }
+        } else {
+          const selector = rest.join(" ");
+          res = await action({ action: "click", selector });
+          if (res.data && res.data.ok === false) {
+            // JS click fallback (works on 0.1.0 bridge)
+            const script = `(() => {
+              const el = document.querySelector(${JSON.stringify(selector)});
+              if (!el) return { ok:false, error:'not found' };
+              el.scrollIntoView({block:'center'});
+              el.focus({preventScroll:true});
+              el.click();
+              const r = el.getBoundingClientRect();
+              return { ok:true, tag: el.tagName, box:{x:r.x,y:r.y,w:r.width,h:r.height} };
+            })()`;
+            res = await action({ action: "evaluate", script });
+          }
+        }
+        break;
+      }
+      case "type":
+      case "fill": {
+        // cursor-browser type <selector> <text...>
+        // cursor-browser type --text hello world  (focused element)
+        if (!rest[0]) throw new Error("usage: type <selector> <text> | type --text <text>");
+        let selector = null;
+        let text = "";
+        if (rest[0] === "--text") {
+          text = rest.slice(1).join(" ");
+        } else {
+          selector = rest[0];
+          text = rest.slice(1).join(" ");
+        }
+        res = await action({
+          action: "type",
+          selector,
+          text,
+          clear: true,
+        });
+        if (res.data && res.data.ok === false) {
+          if (selector) {
+            const script = `(() => {
+              const el = document.querySelector(${JSON.stringify(selector)});
+              if (!el) return { ok:false, error:'not found' };
+              el.focus({preventScroll:true});
+              if ('value' in el) {
+                const proto = Object.getOwnPropertyDescriptor(
+                  el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
+                  'value'
+                );
+                if (proto && proto.set) proto.set.call(el, ${JSON.stringify(text)});
+                else el.value = ${JSON.stringify(text)};
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok:true, value: el.value };
+              }
+              if (el.isContentEditable) {
+                el.textContent = ${JSON.stringify(text)};
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                return { ok:true, value: el.textContent };
+              }
+              return { ok:false, error:'not typeable' };
+            })()`;
+            res = await action({ action: "evaluate", script });
+          } else {
+            res = await action({
+              action: "cdp",
+              method: "Input.insertText",
+              params: { text },
+            });
+          }
+        }
+        break;
+      }
+      case "press": {
+        if (!rest[0]) throw new Error("key required (Enter, Tab, Escape, ...)");
+        const key = rest[0];
+        res = await action({ action: "press", key });
+        if (res.data && res.data.ok === false) {
+          const map = {
+            Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" },
+            Tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
+            Escape: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
+          };
+          const spec = map[key] || { key, code: key };
+          await action({
+            action: "cdp",
+            method: "Input.dispatchKeyEvent",
+            params: { type: "keyDown", ...spec },
+          });
+          res = await action({
+            action: "cdp",
+            method: "Input.dispatchKeyEvent",
+            params: {
+              type: "keyUp",
+              key: spec.key,
+              code: spec.code,
+              windowsVirtualKeyCode: spec.windowsVirtualKeyCode,
+            },
+          });
+        }
+        break;
+      }
       case "url":
         res = await action({ action: "url" });
         break;
