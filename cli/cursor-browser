@@ -349,9 +349,13 @@ Commands:
   status                  Health + workspace for the resolved window
   whoami                  Which window this CLI would hit
   probe
-  open <url>              Open Browser Tab IN THAT window + navigate
-  nav|navigate <url>
-  tabs | url | title
+  open <url>              Reuse single tab if present (closes extras)
+  nav|navigate <url>      Navigate active tab only (never opens a new tab)
+  tabs | close            List tabs / close extras (keep one)
+  click <selector>        Click element
+  type <selector> <text>  Type/fill into element
+  press Enter|Tab|Escape  Key / form submit
+  url | title
   snap [path.png]
   eval <js>
   back | forward | reload
