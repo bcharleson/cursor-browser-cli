@@ -1,77 +1,76 @@
 #!/usr/bin/env bash
-# Install Cursor Browser Bridge extension + optional CLI symlink + Grok MCP entry
+# Install Cursor Browser Bridge: extension + CLI + optional MCP for Grok/Claude
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EXT_DIR="$ROOT/extension"
 CLI="$ROOT/cli/cursor-browser"
 MCP="$ROOT/mcp/server.mjs"
+VERSION="$(node -p "require('$EXT_DIR/package.json').version" 2>/dev/null || echo 0.3.0)"
 
-echo "==> cursor-browser-bridge install"
+echo "==> cursor-browser-bridge install v${VERSION}"
 echo "    root: $ROOT"
 
 chmod +x "$CLI" "$MCP" "$ROOT/scripts/install.sh" 2>/dev/null || true
 
-# Symlink CLI into ~/.local/bin if present
+# CLI
 BIN_DIR="${HOME}/.local/bin"
 mkdir -p "$BIN_DIR"
 ln -sfn "$CLI" "$BIN_DIR/cursor-browser"
 echo "    CLI:  $BIN_DIR/cursor-browser"
 
-# Install as Cursor extension (dev / unpacked)
-if command -v cursor >/dev/null 2>&1; then
-  # Prefer packing if vsce available, else use --install-extension on folder via symlink into extensions
-  EXT_TARGET="${HOME}/.cursor/extensions/local.cursor-browser-bridge-0.1.0"
-  rm -rf "$EXT_TARGET"
-  mkdir -p "$EXT_TARGET"
-  # Copy extension files (no node_modules needed)
-  cp "$EXT_DIR/package.json" "$EXT_TARGET/"
-  cp "$EXT_DIR/extension.js" "$EXT_TARGET/"
-  # Cursor/VS Code expects package.json name matching folder conventions
-  echo "    extension installed to: $EXT_TARGET"
-  echo "    Reload Cursor window to activate (Cmd+Shift+P → Developer: Reload Window)"
-else
-  echo "    warning: 'cursor' CLI not found; copy extension manually to ~/.cursor/extensions/"
-fi
+# Extension (unpacked) — current + legacy folder names Cursor may already load
+install_ext() {
+  local target="$1"
+  rm -rf "$target"
+  mkdir -p "$target"
+  cp "$EXT_DIR/package.json" "$EXT_DIR/extension.js" "$target/"
+  echo "    extension → $target"
+}
 
-# Grok MCP registration (optional)
+install_ext "${HOME}/.cursor/extensions/local.cursor-browser-bridge-${VERSION}"
+install_ext "${HOME}/.cursor/extensions/local.cursor-browser-bridge-0.1.0"
+install_ext "${HOME}/.cursor/extensions/local.cursor-browser-bridge-0.2.0"
+
+# Grok MCP
 if command -v grok >/dev/null 2>&1; then
   if grok mcp list 2>/dev/null | grep -qi 'cursor-browser'; then
     echo "    Grok MCP: cursor-browser already configured"
   else
     echo "    Adding Grok MCP server 'cursor-browser'..."
-    grok mcp add cursor-browser -- node "$MCP" || {
-      echo "    Could not auto-add MCP. Add manually to ~/.grok/config.toml:"
-      cat <<EOF
-
-[mcp_servers.cursor-browser]
-command = "node"
-args = ["$MCP"]
-enabled = true
-EOF
-    }
+    grok mcp add cursor-browser -- node "$MCP" || true
   fi
 else
-  echo "    grok CLI not found; skip MCP registration"
-  echo "    Manual ~/.grok/config.toml entry:"
-  cat <<EOF
-
-[mcp_servers.cursor-browser]
-command = "node"
-args = ["$MCP"]
-enabled = true
-EOF
+  echo "    (grok CLI not found — skip Grok MCP)"
 fi
 
-# User-level Grok skill
+# Claude Code MCP (optional)
+if command -v claude >/dev/null 2>&1; then
+  if claude mcp list 2>/dev/null | grep -qi 'cursor-browser'; then
+    echo "    Claude MCP: cursor-browser already configured"
+  else
+    echo "    Tip: claude mcp add cursor-browser -- node \"$MCP\""
+  fi
+fi
+
+# Grok skill
 SKILL_DIR="${HOME}/.grok/skills/cursor-browser"
-mkdir -p "$SKILL_DIR"
-cp "$ROOT/skill/SKILL.md" "$SKILL_DIR/SKILL.md"
-echo "    Grok skill: $SKILL_DIR/SKILL.md"
+if [ -d "${HOME}/.grok/skills" ] || mkdir -p "$SKILL_DIR" 2>/dev/null; then
+  mkdir -p "$SKILL_DIR"
+  cp "$ROOT/skill/SKILL.md" "$SKILL_DIR/SKILL.md"
+  echo "    Grok skill: $SKILL_DIR/SKILL.md"
+fi
 
 echo ""
 echo "Done. Next:"
-echo "  1. Reload Cursor (Developer: Reload Window)"
-echo "  2. Open Browser Tab (View → Appearance → Open Browser)"
-echo "  3. cursor-browser status"
-echo "  4. cursor-browser open http://localhost:3000"
+echo "  1. Reload each Cursor window (Developer: Reload Window)"
+echo "  2. cursor-browser windows"
+echo "  3. cursor-browser --workspace <project> open https://example.com"
+echo "  4. cursor-browser --workspace <project> inspect"
+echo "  5. cursor-browser --workspace <project> snap /tmp/out.png"
+echo ""
+echo "MCP (any client):"
+echo "  node $MCP"
+echo ""
+echo "Claude Code:"
+echo "  claude mcp add cursor-browser -- node $MCP"

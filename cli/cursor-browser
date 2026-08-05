@@ -356,11 +356,15 @@ Commands:
   type <selector> <text>  Type/fill into element
   press Enter|Tab|Escape  Key / form submit
   url | title
-  snap [path.png]
-  eval <js>
+  snap [path.png]         Screenshot (PNG)
+  eval <js>               Run JS in page
+  inspect | dom           Under-the-hood page structure (meta, links, inputs, text)
+  a11y | snapshot         Lightweight accessibility tree
+  console | logs          Browser console messages
+  network                 Network request log
   back | forward | reload
   select <viewId>
-  cdp <Method> [json]
+  cdp <Method> [json]     Raw CDP when allowed
 
 Routing (important with multiple Cursor windows):
   1. --port N / CURSOR_BROWSER_BRIDGE_PORT
@@ -670,6 +674,25 @@ async function main() {
       case "evaluate":
         if (!rest[0]) throw new Error("js expression/script required");
         res = await action({ action: "evaluate", script: rest.join(" ") });
+        break;
+      case "console":
+      case "logs":
+        res = await action({ action: "console" });
+        break;
+      case "network":
+        res = await action({ action: "network" });
+        break;
+      case "inspect":
+      case "dom":
+      case "underhood":
+        res = await action({ action: "inspect" });
+        break;
+      case "a11y":
+      case "snapshot":
+        res = await action({
+          action: "a11y",
+          maxNodes: rest[0] ? Number(rest[0]) : 200,
+        });
         break;
       case "back":
         res = await action({ action: "back" });

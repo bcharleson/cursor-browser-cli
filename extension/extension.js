@@ -427,6 +427,125 @@ async function selectTab(viewId) {
   return tryShapes("cursor.browserView.selectTab", [[viewId], [viewId, {}]]);
 }
 
+async function getConsoleLogs(viewId) {
+  return tryShapes("cursor.browserView.getConsoleLogs", [
+    [],
+    [viewId],
+    [viewId, {}],
+  ]);
+}
+
+async function getNetworkRequests(viewId) {
+  return tryShapes("cursor.browserView.getNetworkRequests", [
+    [],
+    [viewId],
+    [viewId, {}],
+  ]);
+}
+
+/** Structured page inspection (DOM + meta) — under-the-hood without opening DevTools UI. */
+async function inspectPage(viewId, opts = {}) {
+  const maxText = Number(opts.maxText) || 4000;
+  const maxLinks = Number(opts.maxLinks) || 40;
+  const maxInputs = Number(opts.maxInputs) || 40;
+  const script = `
+    (function() {
+      const maxText = ${maxText};
+      const maxLinks = ${maxLinks};
+      const maxInputs = ${maxInputs};
+      const abs = (u) => { try { return new URL(u, location.href).href; } catch { return u; } };
+      const links = [...document.querySelectorAll("a[href]")].slice(0, maxLinks).map((a) => ({
+        text: (a.innerText || "").trim().slice(0, 80),
+        href: abs(a.getAttribute("href") || ""),
+      }));
+      const inputs = [...document.querySelectorAll("input, textarea, select, button")].slice(0, maxInputs).map((el) => ({
+        tag: el.tagName.toLowerCase(),
+        type: el.getAttribute("type") || null,
+        name: el.getAttribute("name") || null,
+        id: el.id || null,
+        placeholder: el.getAttribute("placeholder") || null,
+        ariaLabel: el.getAttribute("aria-label") || null,
+        text: (el.innerText || el.value || "").toString().slice(0, 60),
+      }));
+      const headings = [...document.querySelectorAll("h1,h2,h3")].slice(0, 30).map((h) => ({
+        tag: h.tagName.toLowerCase(),
+        text: (h.innerText || "").trim().slice(0, 120),
+      }));
+      return {
+        url: location.href,
+        title: document.title,
+        readyState: document.readyState,
+        meta: {
+          description: document.querySelector('meta[name="description"]')?.content || null,
+          viewport: document.querySelector('meta[name="viewport"]')?.content || null,
+          ogTitle: document.querySelector('meta[property="og:title"]')?.content || null,
+        },
+        counts: {
+          links: document.querySelectorAll("a[href]").length,
+          images: document.querySelectorAll("img").length,
+          scripts: document.querySelectorAll("script").length,
+          stylesheets: document.querySelectorAll('link[rel="stylesheet"]').length,
+          forms: document.querySelectorAll("form").length,
+          buttons: document.querySelectorAll("button, input[type=submit], input[type=button]").length,
+          inputs: document.querySelectorAll("input, textarea, select").length,
+        },
+        headings,
+        links,
+        inputs,
+        bodyText: (document.body?.innerText || "").replace(/\\s+/g, " ").trim().slice(0, maxText),
+        htmlLength: document.documentElement?.outerHTML?.length || 0,
+      };
+    })()
+  `;
+  return executeJavaScript(script, viewId);
+}
+
+async function accessibilityTree(viewId, maxNodes = 200) {
+  // Prefer native if ever exposed; fall back to lightweight a11y walk
+  const script = `
+    (function() {
+      const max = ${Number(maxNodes) || 200};
+      const interesting = new Set(["a","button","input","textarea","select","h1","h2","h3","h4","nav","main","header","footer","[role]"]);
+      const out = [];
+      const walk = (root, depth) => {
+        if (!root || out.length >= max || depth > 12) return;
+        const el = root;
+        if (el.nodeType === 1) {
+          const role = el.getAttribute("role") || el.tagName.toLowerCase();
+          const name =
+            el.getAttribute("aria-label") ||
+            el.getAttribute("alt") ||
+            el.getAttribute("placeholder") ||
+            el.getAttribute("name") ||
+            el.getAttribute("title") ||
+            (el.innerText || "").trim().slice(0, 60);
+          const tag = el.tagName.toLowerCase();
+          const keep =
+            interesting.has(tag) ||
+            el.hasAttribute("role") ||
+            el.hasAttribute("aria-label") ||
+            ["A","BUTTON","INPUT","TEXTAREA","SELECT","H1","H2","H3"].includes(el.tagName);
+          if (keep && (name || ["input","button","a","select","textarea"].includes(tag))) {
+            out.push({
+              tag,
+              role,
+              name: name || null,
+              id: el.id || null,
+              href: el.getAttribute && el.getAttribute("href"),
+              type: el.getAttribute && el.getAttribute("type"),
+              depth,
+            });
+          }
+          for (const c of el.children || []) walk(c, depth + 1);
+        }
+      };
+      walk(document.body, 0);
+      return { count: out.length, nodes: out };
+    })()
+  `;
+  return executeJavaScript(script, viewId);
+}
+
 async function probeCommands() {
   const ids = [
     "cursor.browserView.listTabs",
@@ -436,11 +555,14 @@ async function probeCommands() {
     "cursor.browserView.getURL",
     "cursor.browserView.getTitle",
     "cursor.browserView.sendCDPCommand",
+    "cursor.browserView.getConsoleLogs",
+    "cursor.browserView.getNetworkRequests",
     "cursor.browserView.goBack",
     "cursor.browserView.goForward",
     "cursor.browserView.reload",
     "cursor.browserView.newTab",
     "cursor.browserView.selectTab",
+    "cursor.browserView.closeTab",
     "workbench.action.openBrowserEditor",
     "workbench.action.focusOrOpenBrowserEditor",
     "workbench.action.newBrowserTab",
@@ -456,7 +578,7 @@ function instancePayload(extra = {}) {
   return {
     ok: true,
     port: activePort,
-    version: "0.2.0",
+    version: "0.3.0",
     instanceId,
     workspace: workspaceInfo(),
     ...extra,
@@ -550,6 +672,25 @@ async function handleAction(body) {
     case "executeJavaScript":
       if (!script) return { ok: false, error: "script required" };
       return executeJavaScript(script, viewId);
+    case "console":
+    case "getConsoleLogs":
+    case "logs":
+      return getConsoleLogs(viewId);
+    case "network":
+    case "getNetworkRequests":
+      return getNetworkRequests(viewId);
+    case "inspect":
+    case "dom":
+    case "underhood":
+      return inspectPage(viewId, {
+        maxText: body.maxText,
+        maxLinks: body.maxLinks,
+        maxInputs: body.maxInputs,
+      });
+    case "a11y":
+    case "accessibility":
+    case "snapshot":
+      return accessibilityTree(viewId, body.maxNodes || body.limit);
     case "cdp":
     case "sendCDP":
       if (!method) return { ok: false, error: "method required" };
@@ -584,6 +725,10 @@ async function handleAction(body) {
           "type",
           "press",
           "evaluate",
+          "console",
+          "network",
+          "inspect",
+          "a11y",
           "cdp",
           "back",
           "forward",

@@ -1,51 +1,68 @@
 ---
 name: cursor-browser
 description: >
-  Drive Cursor's built-in Browser Tab from Grok Build via cursor-browser-bridge
-  (not chrome-cdp, not Peekaboo). Targets the same Cursor project window as the
-  workspace. Use for "Cursor browser", "Browser Tab", open/navigate/screenshot
-  in Cursor, /cursor-browser.
+  Drive Cursor's built-in Browser Tab via cursor-browser-bridge (not chrome-cdp,
+  not Peekaboo). Works for Grok Build in Cursor terminal. Navigate, click, type,
+  screenshot, inspect DOM/console/network. Triggers: Cursor browser, Browser Tab,
+  /cursor-browser, under the hood, DevTools.
 ---
 
-# Cursor Browser (per project window)
+# Cursor Browser Bridge
 
-## Critical: multi-window routing
+## Scope
 
-You may have several Cursor windows (Tripwire, other repos). Each runs its own
-bridge. **Always target the correct project.**
+Control **Cursor’s Browser Tab** in the correct project window.  
+Do **not** use chrome-cdp or Peekaboo for this.
+
+Repo: `~/Developer/cursor-browser-bridge` (or install path).
+
+## Always route the window
 
 ```bash
-# See which windows are bridged
 cursor-browser windows
-
-# Explicit (recommended when ambiguous)
-cursor-browser --workspace af-exec-travel open http://localhost:3000
-
-# Or: run CLI with cwd inside that project
-cd ~/Developer/af-exec-travel && cursor-browser open http://localhost:3000
+cursor-browser --workspace <project-folder-name> whoami
 ```
 
-MCP tools accept optional `workspace` (e.g. `"af-exec-travel"`).
+Or `cd` into the project first.
 
-## Workflow
-
-1. `cursor-browser windows` — pick the right project
-2. `cursor-browser --workspace <name> whoami` — confirm routing
-3. `cursor-browser --workspace <name> open <url>` — Browser Tab **in that window**
-4. `url` / `title` / `eval` / `snap` as needed
-
-## Do not use
-
-- chrome-cdp (external Chrome)
-- Peekaboo (macOS UI automation)
-
-## Install / reload
-
-Repo: `~/Developer/cursor-browser-bridge` (not inside product apps).
+## Preferred single-tab flow
 
 ```bash
-~/Developer/cursor-browser-bridge/scripts/install.sh
-# Then: Developer: Reload Window in EACH Cursor window you care about
+cursor-browser --workspace <name> close
+cursor-browser --workspace <name> nav https://example.com
+# prefer nav over open when a tab already exists
 ```
 
-Status bar should show: `$(globe) af-exec-travel :1737x` in the Tripwire window.
+## Interaction
+
+```bash
+cursor-browser --workspace <name> click 'css-selector'
+cursor-browser --workspace <name> type 'css-selector' 'text'
+cursor-browser --workspace <name> press Enter
+cursor-browser --workspace <name> snap /tmp/page.png
+```
+
+## Under the hood
+
+```bash
+cursor-browser --workspace <name> inspect    # meta, links, inputs, text
+cursor-browser --workspace <name> a11y       # interactive tree
+cursor-browser --workspace <name> console    # console logs
+cursor-browser --workspace <name> network    # network requests
+cursor-browser --workspace <name> eval '...' # any page JS
+```
+
+## MCP tools
+
+If `cursor-browser` MCP is connected: `browser_navigate`, `browser_click`,
+`browser_type`, `browser_screenshot`, `browser_inspect`, `browser_console`,
+`browser_network`, `browser_evaluate`, … with optional `workspace`.
+
+## Failure tips
+
+| Issue | Action |
+|-------|--------|
+| Connection refused | Reload Cursor window; re-run install.sh |
+| Wrong project | `--workspace` or cwd into project |
+| Extra tabs | `close` then `nav` |
+| CDP Input blocked | use click/type/press (DOM) |

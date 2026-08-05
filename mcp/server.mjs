@@ -226,8 +226,8 @@ const TOOLS = [
     },
   },
   {
-    name: "browser_snapshot",
-    description: "Screenshot the Browser Tab in the target project window.",
+    name: "browser_screenshot",
+    description: "Screenshot the Browser Tab viewport (PNG). Use for visual QA.",
     inputSchema: {
       type: "object",
       properties: {
@@ -240,8 +240,50 @@ const TOOLS = [
     },
   },
   {
+    name: "browser_snapshot",
+    description:
+      "Lightweight accessibility / interactive element tree (under-the-hood structure).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        maxNodes: { type: "number" },
+        viewId: { type: "string" },
+        ...WS_PROP,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_inspect",
+    description:
+      "Under-the-hood page inspection: URL, meta, counts, headings, links, inputs, body text sample.",
+    inputSchema: {
+      type: "object",
+      properties: { viewId: { type: "string" }, ...WS_PROP },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_console",
+    description: "Browser console log messages (like DevTools Console).",
+    inputSchema: {
+      type: "object",
+      properties: { viewId: { type: "string" }, ...WS_PROP },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_network",
+    description: "Network request log for the Browser Tab (like DevTools Network).",
+    inputSchema: {
+      type: "object",
+      properties: { viewId: { type: "string" }, ...WS_PROP },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "browser_evaluate",
-    description: "Run JavaScript in the Browser Tab page of the target window.",
+    description: "Run JavaScript in the Browser Tab page context.",
     inputSchema: {
       type: "object",
       properties: {
@@ -250,6 +292,49 @@ const TOOLS = [
         ...WS_PROP,
       },
       required: ["script"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_click",
+    description: "Click an element by CSS selector.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string" },
+        viewId: { type: "string" },
+        ...WS_PROP,
+      },
+      required: ["selector"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_type",
+    description: "Type/fill text into an element by CSS selector.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string" },
+        text: { type: "string" },
+        viewId: { type: "string" },
+        ...WS_PROP,
+      },
+      required: ["selector", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_press",
+    description: "Press a key (Enter submits forms when focused).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Enter, Tab, Escape, ..." },
+        viewId: { type: "string" },
+        ...WS_PROP,
+      },
+      required: ["key"],
       additionalProperties: false,
     },
   },
@@ -292,7 +377,8 @@ const TOOLS = [
   },
   {
     name: "browser_cdp",
-    description: "Send a raw CDP command to the Browser Tab in the target window.",
+    description:
+      "Send a raw CDP command when allowed (many Input.* methods are blocked by Electron).",
     inputSchema: {
       type: "object",
       properties: {
@@ -347,7 +433,8 @@ async function callTool(name, args = {}) {
       return act({ action: "url", viewId: args.viewId }, ws);
     case "browser_title":
       return act({ action: "title", viewId: args.viewId }, ws);
-    case "browser_snapshot":
+    case "browser_screenshot":
+    case "browser_snap":
       return act(
         {
           action: "screenshot",
@@ -357,8 +444,31 @@ async function callTool(name, args = {}) {
         },
         ws
       );
+    case "browser_snapshot":
+    case "browser_a11y":
+      return act(
+        { action: "a11y", maxNodes: args.maxNodes, viewId: args.viewId },
+        ws
+      );
+    case "browser_inspect":
+      return act({ action: "inspect", viewId: args.viewId }, ws);
+    case "browser_console":
+      return act({ action: "console", viewId: args.viewId }, ws);
+    case "browser_network":
+      return act({ action: "network", viewId: args.viewId }, ws);
     case "browser_evaluate":
       return act({ action: "evaluate", script: args.script, viewId: args.viewId }, ws);
+    case "browser_click":
+      return act({ action: "click", selector: args.selector, viewId: args.viewId }, ws);
+    case "browser_type":
+      return act({
+        action: "type",
+        selector: args.selector,
+        text: args.text,
+        viewId: args.viewId,
+      }, ws);
+    case "browser_press":
+      return act({ action: "press", key: args.key, viewId: args.viewId }, ws);
     case "browser_back":
       return act({ action: "back", viewId: args.viewId }, ws);
     case "browser_forward":
@@ -435,7 +545,7 @@ process.stdin.on("data", async (chunk) => {
         sendResult(id, {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "cursor-browser-bridge", version: "0.1.0" },
+          serverInfo: { name: "cursor-browser-bridge", version: "0.3.0" },
         });
       } else if (method === "notifications/initialized" || method === "initialized") {
         // no-op
