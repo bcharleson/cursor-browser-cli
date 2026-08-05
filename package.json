@@ -7,9 +7,9 @@
   "author": "Brandon Charleson",
   "repository": {
     "type": "git",
-    "url": "https://github.com/brandoncharleson/cursor-browser-cli.git"
+    "url": "https://github.com/bcharleson/cursor-browser-cli.git"
   },
-  "homepage": "https://github.com/brandoncharleson/cursor-browser-cli#readme",
+  "homepage": "https://github.com/bcharleson/cursor-browser-cli#readme",
   "keywords": [
     "cursor",
     "cursor-ide",
