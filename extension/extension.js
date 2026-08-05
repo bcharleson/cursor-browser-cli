@@ -1,8 +1,8 @@
 /* eslint-disable no-console */
 /**
  * Cursor Browser Bridge
- * Exposes Cursor's internal browserView commands over localhost HTTP
- * so Grok Build / CLI / MCP clients can drive the Cursor Browser Tab.
+ * Per-window HTTP bridge so Grok/CLI can target the Browser Tab in the
+ * same Cursor project/window as the caller's workspace (cwd).
  */
 const vscode = require("vscode");
 const http = require("http");
@@ -11,12 +11,16 @@ const path = require("path");
 const os = require("os");
 
 const STATE_DIR = path.join(os.homedir(), ".cursor-browser-bridge");
-const PORT_FILE = path.join(STATE_DIR, "port");
+const INSTANCES_FILE = path.join(STATE_DIR, "instances.json");
+const PORT_FILE = path.join(STATE_DIR, "port"); // legacy: last-writer (prefer instances.json)
 const LOG_FILE = path.join(STATE_DIR, "bridge.log");
+const BASE_PORT = 17373;
+const MAX_PORT_TRIES = 32;
 
 let server = null;
 let statusBar = null;
 let activePort = null;
+let instanceId = null;
 
 function log(...args) {
   const line = `[${new Date().toISOString()}] ${args.map(String).join(" ")}\n`;
@@ -27,6 +31,88 @@ function log(...args) {
     /* ignore */
   }
   console.log("[cursor-browser-bridge]", ...args);
+}
+
+function workspaceInfo() {
+  const folders = vscode.workspace.workspaceFolders || [];
+  const paths = folders.map((f) => f.uri.fsPath);
+  const names = folders.map((f) => f.name);
+  // Prefer first folder name; also expose basenames for matching
+  const primary = paths[0] || null;
+  const primaryName = names[0] || null;
+  return {
+    workspacePaths: paths,
+    workspaceNames: names,
+    primaryPath: primary,
+    primaryName: primaryName,
+    basenames: paths.map((p) => path.basename(p)),
+  };
+}
+
+function readInstances() {
+  try {
+    if (!fs.existsSync(INSTANCES_FILE)) return {};
+    return JSON.parse(fs.readFileSync(INSTANCES_FILE, "utf8") || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function writeInstances(map) {
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  const tmp = INSTANCES_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(map, null, 2));
+  fs.renameSync(tmp, INSTANCES_FILE);
+}
+
+function registerInstance(port) {
+  const info = workspaceInfo();
+  instanceId =
+    instanceId ||
+    `w-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  const map = readInstances();
+  // Drop stale entries for same primary path (reloads)
+  for (const [id, inst] of Object.entries(map)) {
+    if (
+      inst.primaryPath &&
+      info.primaryPath &&
+      path.resolve(inst.primaryPath) === path.resolve(info.primaryPath) &&
+      id !== instanceId
+    ) {
+      delete map[id];
+    }
+    // Drop dead ports: if pid gone
+    if (inst.pid && inst.pid !== process.pid) {
+      try {
+        process.kill(inst.pid, 0);
+      } catch {
+        delete map[id];
+      }
+    }
+  }
+  map[instanceId] = {
+    id: instanceId,
+    port,
+    pid: process.pid,
+    updatedAt: new Date().toISOString(),
+    ...info,
+  };
+  writeInstances(map);
+  // Keep legacy port file for tools that don't multi-route yet — only if single instance
+  // Prefer writing the most recently updated; CLI should use instances.json
+  fs.writeFileSync(PORT_FILE, String(port));
+  log("registered", instanceId, "port", port, "workspace", info.primaryName || info.primaryPath);
+}
+
+function unregisterInstance() {
+  if (!instanceId) return;
+  try {
+    const map = readInstances();
+    delete map[instanceId];
+    writeInstances(map);
+  } catch {
+    /* ignore */
+  }
 }
 
 async function cmd(id, ...args) {
@@ -40,11 +126,6 @@ async function cmd(id, ...args) {
   }
 }
 
-/**
- * Try multiple arg shapes because Cursor's command wrappers inject services
- * as the first parameter when registered internally, but executeCommand
- * only passes our args.
- */
 async function tryShapes(command, shapes) {
   const errors = [];
   for (const shape of shapes) {
@@ -56,10 +137,10 @@ async function tryShapes(command, shapes) {
 }
 
 async function ensureBrowserOpen(url) {
-  // Prefer opening the Browser editor first
+  // Open browser IN THIS window only (commands run in this extension host)
   const openAttempts = [
-    ["workbench.action.openBrowserEditor"],
     ["workbench.action.focusOrOpenBrowserEditor"],
+    ["workbench.action.openBrowserEditor"],
     ["workbench.action.newBrowserTab"],
     ["composer.openBrowserTab"],
     ["glass.openBrowserTab", url ? { url } : undefined],
@@ -75,9 +156,11 @@ async function ensureBrowserOpen(url) {
     }
   }
   if (url) {
+    // Small delay so the view exists
+    await new Promise((r) => setTimeout(r, 150));
     return navigate(url);
   }
-  return { ok: true, result: { opened: true } };
+  return { ok: true, result: { opened: true, workspace: workspaceInfo() } };
 }
 
 async function navigate(url, viewId) {
@@ -94,29 +177,20 @@ async function listTabs() {
 }
 
 async function getURL(viewId) {
-  return tryShapes("cursor.browserView.getURL", [
-    [],
-    [viewId],
-    [viewId, {}],
-  ]);
+  return tryShapes("cursor.browserView.getURL", [[], [viewId], [viewId, {}]]);
 }
 
 async function getTitle(viewId) {
-  return tryShapes("cursor.browserView.getTitle", [
-    [],
-    [viewId],
-    [viewId, {}],
-  ]);
+  return tryShapes("cursor.browserView.getTitle", [[], [viewId], [viewId, {}]]);
 }
 
 async function takeScreenshot(opts = {}) {
-  const shapes = [
+  return tryShapes("cursor.browserView.takeScreenshot", [
     [opts],
     [{ ...opts }],
     [opts.viewId, opts],
     [],
-  ];
-  return tryShapes("cursor.browserView.takeScreenshot", shapes);
+  ]);
 }
 
 async function executeJavaScript(script, viewId) {
@@ -151,6 +225,42 @@ async function selectTab(viewId) {
   return tryShapes("cursor.browserView.selectTab", [[viewId], [viewId, {}]]);
 }
 
+async function probeCommands() {
+  const ids = [
+    "cursor.browserView.listTabs",
+    "cursor.browserView.navigate",
+    "cursor.browserView.takeScreenshot",
+    "cursor.browserView.executeJavaScript",
+    "cursor.browserView.getURL",
+    "cursor.browserView.getTitle",
+    "cursor.browserView.sendCDPCommand",
+    "cursor.browserView.goBack",
+    "cursor.browserView.goForward",
+    "cursor.browserView.reload",
+    "cursor.browserView.newTab",
+    "cursor.browserView.selectTab",
+    "workbench.action.openBrowserEditor",
+    "workbench.action.focusOrOpenBrowserEditor",
+    "workbench.action.newBrowserTab",
+    "composer.openBrowserTab",
+  ];
+  const all = await vscode.commands.getCommands(true);
+  const report = {};
+  for (const id of ids) report[id] = all.includes(id);
+  return { ok: true, result: report };
+}
+
+function instancePayload(extra = {}) {
+  return {
+    ok: true,
+    port: activePort,
+    version: "0.2.0",
+    instanceId,
+    workspace: workspaceInfo(),
+    ...extra,
+  };
+}
+
 async function handleAction(body) {
   const action = body.action || body.tool || body.cmd;
   const url = body.url;
@@ -163,14 +273,14 @@ async function handleAction(body) {
     case "status":
     case "health": {
       const tabs = await listTabs();
-      return {
-        ok: true,
-        port: activePort,
-        version: "0.1.0",
+      return instancePayload({
         tabs: tabs.ok ? tabs.result : null,
         tabsError: tabs.ok ? null : tabs.error,
-      };
+      });
     }
+    case "whoami":
+    case "workspace":
+      return instancePayload();
     case "open":
       return ensureBrowserOpen(url);
     case "navigate":
@@ -215,7 +325,6 @@ async function handleAction(body) {
       if (!viewId) return { ok: false, error: "viewId required" };
       return selectTab(viewId);
     case "probe":
-      // Discover which commands exist and respond
       return probeCommands();
     default:
       return {
@@ -223,6 +332,7 @@ async function handleAction(body) {
         error: `Unknown action: ${action}`,
         available: [
           "status",
+          "whoami",
           "open",
           "navigate",
           "tabs",
@@ -239,33 +349,6 @@ async function handleAction(body) {
         ],
       };
   }
-}
-
-async function probeCommands() {
-  const ids = [
-    "cursor.browserView.listTabs",
-    "cursor.browserView.navigate",
-    "cursor.browserView.takeScreenshot",
-    "cursor.browserView.executeJavaScript",
-    "cursor.browserView.getURL",
-    "cursor.browserView.getTitle",
-    "cursor.browserView.sendCDPCommand",
-    "cursor.browserView.goBack",
-    "cursor.browserView.goForward",
-    "cursor.browserView.reload",
-    "cursor.browserView.newTab",
-    "cursor.browserView.selectTab",
-    "workbench.action.openBrowserEditor",
-    "workbench.action.focusOrOpenBrowserEditor",
-    "workbench.action.newBrowserTab",
-    "composer.openBrowserTab",
-  ];
-  const all = await vscode.commands.getCommands(true);
-  const report = {};
-  for (const id of ids) {
-    report[id] = all.includes(id);
-  }
-  return { ok: true, result: report };
 }
 
 function readBody(req) {
@@ -298,7 +381,6 @@ function sendJson(res, status, data) {
 function startServer(port) {
   return new Promise((resolve, reject) => {
     const s = http.createServer(async (req, res) => {
-      // CORS preflight
       if (req.method === "OPTIONS") {
         res.writeHead(204, {
           "Access-Control-Allow-Origin": "*",
@@ -311,47 +393,51 @@ function startServer(port) {
       try {
         const u = new URL(req.url || "/", `http://127.0.0.1:${port}`);
 
-        if (req.method === "GET" && (u.pathname === "/" || u.pathname === "/health" || u.pathname === "/status")) {
-          const result = await handleAction({ action: "status" });
+        if (
+          req.method === "GET" &&
+          (u.pathname === "/" ||
+            u.pathname === "/health" ||
+            u.pathname === "/status" ||
+            u.pathname === "/whoami")
+        ) {
+          const result = await handleAction({
+            action: u.pathname === "/whoami" ? "whoami" : "status",
+          });
           return sendJson(res, 200, result);
         }
 
         if (req.method === "GET" && u.pathname === "/probe") {
-          const result = await handleAction({ action: "probe" });
-          return sendJson(res, 200, result);
+          return sendJson(res, 200, await handleAction({ action: "probe" }));
         }
 
         if (req.method === "POST" && (u.pathname === "/action" || u.pathname === "/")) {
           const body = await readBody(req);
           const result = await handleAction(body);
-          return sendJson(res, result.ok ? 200 : 400, result);
+          return sendJson(res, result.ok === false ? 400 : 200, result);
         }
 
-        // REST-ish shortcuts
         if (req.method === "POST" && u.pathname.startsWith("/")) {
           const action = u.pathname.slice(1);
           const body = await readBody(req);
           body.action = body.action || action;
           const result = await handleAction(body);
-          return sendJson(res, result.ok ? 200 : 400, result);
+          return sendJson(res, result.ok === false ? 400 : 200, result);
         }
 
         sendJson(res, 404, { ok: false, error: "Not found" });
       } catch (err) {
         log("request error", err);
-        sendJson(res, 500, { ok: false, error: String(err && err.message ? err.message : err) });
+        sendJson(res, 500, {
+          ok: false,
+          error: String(err && err.message ? err.message : err),
+        });
       }
     });
 
-    s.on("error", (err) => {
-      log("server error", err.message);
-      reject(err);
-    });
-
+    s.on("error", (err) => reject(err));
     s.listen(port, "127.0.0.1", () => {
       activePort = port;
-      fs.mkdirSync(STATE_DIR, { recursive: true });
-      fs.writeFileSync(PORT_FILE, String(port));
+      registerInstance(port);
       log("listening on 127.0.0.1:" + port);
       resolve(s);
     });
@@ -359,15 +445,11 @@ function startServer(port) {
 }
 
 async function stopServer() {
+  unregisterInstance();
   if (!server) return;
   await new Promise((resolve) => server.close(() => resolve()));
   server = null;
   activePort = null;
-  try {
-    if (fs.existsSync(PORT_FILE)) fs.unlinkSync(PORT_FILE);
-  } catch {
-    /* ignore */
-  }
 }
 
 async function restartServer(context) {
@@ -377,47 +459,42 @@ async function restartServer(context) {
     updateStatusBar(false);
     return;
   }
-  const port = cfg.get("port", 17373);
-  try {
-    server = await startServer(port);
-    updateStatusBar(true);
-    vscode.window.setStatusBarMessage(`Cursor Browser Bridge on :${port}`, 3000);
-  } catch (err) {
-    // Port in use — try next few
-    let started = false;
-    for (let p = port + 1; p < port + 10; p++) {
-      try {
-        server = await startServer(p);
-        updateStatusBar(true);
-        vscode.window.showWarningMessage(
-          `Cursor Browser Bridge: port ${port} busy, using ${p}`
-        );
-        started = true;
-        break;
-      } catch {
-        /* try next */
-      }
-    }
-    if (!started) {
-      log("failed to start", err);
-      vscode.window.showErrorMessage(
-        `Cursor Browser Bridge failed to start: ${err.message || err}`
+  const preferred = cfg.get("port", BASE_PORT);
+  let lastErr;
+  for (let p = preferred; p < preferred + MAX_PORT_TRIES; p++) {
+    try {
+      server = await startServer(p);
+      updateStatusBar(true);
+      const ws = workspaceInfo().primaryName || workspaceInfo().primaryPath || "workspace";
+      vscode.window.setStatusBarMessage(
+        `Browser Bridge :${p} → ${ws}`,
+        4000
       );
-      updateStatusBar(false);
+      return;
+    } catch (err) {
+      lastErr = err;
     }
   }
+  log("failed to start", lastErr);
+  vscode.window.showErrorMessage(
+    `Cursor Browser Bridge failed to start: ${lastErr && lastErr.message ? lastErr.message : lastErr}`
+  );
+  updateStatusBar(false);
 }
 
 function updateStatusBar(ok) {
   if (!statusBar) return;
+  const ws = workspaceInfo().primaryName || "no-folder";
   if (ok && activePort) {
-    statusBar.text = `$(globe) Browser Bridge :${activePort}`;
-    statusBar.tooltip = `Cursor Browser Bridge listening on 127.0.0.1:${activePort}`;
+    statusBar.text = `$(globe) ${ws} :${activePort}`;
+    statusBar.tooltip = `Cursor Browser Bridge for ${ws}\n127.0.0.1:${activePort}\n${workspaceInfo().primaryPath || ""}`;
     statusBar.backgroundColor = undefined;
   } else {
-    statusBar.text = "$(globe) Browser Bridge off";
-    statusBar.tooltip = "Cursor Browser Bridge is not running";
-    statusBar.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+    statusBar.text = `$(globe) Bridge off (${ws})`;
+    statusBar.tooltip = "Cursor Browser Bridge is not running in this window";
+    statusBar.backgroundColor = new vscode.ThemeColor(
+      "statusBarItem.warningBackground"
+    );
   }
   statusBar.show();
 }
@@ -426,20 +503,20 @@ function updateStatusBar(ok) {
  * @param {vscode.ExtensionContext} context
  */
 async function activate(context) {
-  log("activate");
-  statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  log("activate", workspaceInfo());
+  statusBar = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    100
+  );
   statusBar.command = "cursorBrowserBridge.status";
   context.subscriptions.push(statusBar);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("cursorBrowserBridge.status", async () => {
       const s = await handleAction({ action: "status" });
-      const p = await handleAction({ action: "probe" });
-      vscode.window.showInformationMessage(
-        `Bridge port=${s.port || "off"} tabs=${JSON.stringify(s.tabs).slice(0, 120)}`
-      );
+      const msg = `Bridge :${s.port} workspace=${s.workspace && s.workspace.primaryName} tabs=${JSON.stringify(s.tabs).slice(0, 80)}`;
+      vscode.window.showInformationMessage(msg);
       log("status", JSON.stringify(s));
-      log("probe", JSON.stringify(p));
     })
   );
 
@@ -454,6 +531,14 @@ async function activate(context) {
       if (e.affectsConfiguration("cursorBrowserBridge")) {
         await restartServer(context);
       }
+    })
+  );
+
+  // Re-register if folders change
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      if (activePort) registerInstance(activePort);
+      updateStatusBar(!!activePort);
     })
   );
 

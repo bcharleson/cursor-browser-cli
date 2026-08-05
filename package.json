@@ -1,6 +1,6 @@
 {
   "name": "cursor-browser-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drive Cursor's built-in Browser Tab from Grok Build / CLI / MCP (not chrome-cdp)",
   "private": false,
   "license": "MIT",

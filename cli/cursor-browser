@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
  * cursor-browser — CLI client for Cursor Browser Bridge
- * Talks to the local extension HTTP API (default 127.0.0.1:17373)
+ *
+ * Multi-window aware: routes to the bridge instance whose workspace
+ * matches cwd (or --workspace / CURSOR_BROWSER_WORKSPACE).
  */
 const fs = require("fs");
 const os = require("os");
@@ -9,26 +11,187 @@ const path = require("path");
 const http = require("http");
 
 const STATE_DIR = path.join(os.homedir(), ".cursor-browser-bridge");
+const INSTANCES_FILE = path.join(STATE_DIR, "instances.json");
 const PORT_FILE = path.join(STATE_DIR, "port");
 const DEFAULT_PORT = 17373;
 
-function resolvePort() {
-  if (process.env.CURSOR_BROWSER_BRIDGE_PORT) {
-    return Number(process.env.CURSOR_BROWSER_BRIDGE_PORT);
-  }
+function readInstances() {
   try {
-    if (fs.existsSync(PORT_FILE)) {
-      const n = Number(fs.readFileSync(PORT_FILE, "utf8").trim());
-      if (n > 0) return n;
-    }
+    if (!fs.existsSync(INSTANCES_FILE)) return {};
+    return JSON.parse(fs.readFileSync(INSTANCES_FILE, "utf8") || "{}");
   } catch {
-    /* ignore */
+    return {};
   }
-  return DEFAULT_PORT;
 }
 
-function request(method, pathname, body) {
-  const port = resolvePort();
+function listInstances() {
+  const map = readInstances();
+  return Object.values(map).sort((a, b) =>
+    String(a.primaryName || "").localeCompare(String(b.primaryName || ""))
+  );
+}
+
+function isAlive(inst) {
+  if (!inst || !inst.port) return false;
+  if (inst.pid) {
+    try {
+      process.kill(inst.pid, 0);
+    } catch {
+      // pid dead — still try HTTP; extension host pid may differ from registered
+    }
+  }
+  return true;
+}
+
+/**
+ * Score how well an instance matches a query path or name.
+ */
+function scoreInstance(inst, query) {
+  if (!query) return 0;
+  const q = path.resolve(query);
+  const qBase = path.basename(q).toLowerCase();
+  const qLower = query.toLowerCase();
+  let score = 0;
+
+  const paths = inst.workspacePaths || (inst.primaryPath ? [inst.primaryPath] : []);
+  const names = inst.workspaceNames || (inst.primaryName ? [inst.primaryName] : []);
+  const bases = inst.basenames || paths.map((p) => path.basename(p));
+
+  for (const p of paths) {
+    const rp = path.resolve(p);
+    if (q === rp) score = Math.max(score, 100);
+    else if (q.startsWith(rp + path.sep)) score = Math.max(score, 90);
+    else if (rp.startsWith(q + path.sep)) score = Math.max(score, 70);
+  }
+  for (const b of bases) {
+    if (b.toLowerCase() === qBase || b.toLowerCase() === qLower) score = Math.max(score, 80);
+    else if (b.toLowerCase().includes(qLower) || qLower.includes(b.toLowerCase()))
+      score = Math.max(score, 50);
+  }
+  for (const n of names) {
+    if (n.toLowerCase() === qLower) score = Math.max(score, 85);
+    else if (n.toLowerCase().includes(qLower)) score = Math.max(score, 55);
+  }
+  return score;
+}
+
+/**
+ * Resolve which bridge port to use.
+ * Priority:
+ *  1. --port / CURSOR_BROWSER_BRIDGE_PORT
+ *  2. --workspace / CURSOR_BROWSER_WORKSPACE (name or path)
+ *  3. Match process.cwd() against registered workspaces
+ *  4. Single instance only
+ *  5. Fail with helpful list
+ */
+function resolveTarget(opts = {}) {
+  if (opts.port || process.env.CURSOR_BROWSER_BRIDGE_PORT) {
+    return {
+      port: Number(opts.port || process.env.CURSOR_BROWSER_BRIDGE_PORT),
+      how: "explicit-port",
+    };
+  }
+
+  const instances = listInstances().filter(isAlive);
+  const query =
+    opts.workspace ||
+    process.env.CURSOR_BROWSER_WORKSPACE ||
+    process.env.CURSOR_BROWSER_PROJECT ||
+    null;
+
+  if (instances.length === 0) {
+    // legacy single port file
+    try {
+      if (fs.existsSync(PORT_FILE)) {
+        const n = Number(fs.readFileSync(PORT_FILE, "utf8").trim());
+        if (n > 0) return { port: n, how: "legacy-port-file" };
+      }
+    } catch {
+      /* ignore */
+    }
+    return { port: DEFAULT_PORT, how: "default", warning: "no instances registered" };
+  }
+
+  if (query) {
+    let best = null;
+    let bestScore = 0;
+    for (const inst of instances) {
+      const s = scoreInstance(inst, query);
+      if (s > bestScore) {
+        bestScore = s;
+        best = inst;
+      }
+    }
+    if (best && bestScore >= 50) {
+      return {
+        port: best.port,
+        how: "workspace-query",
+        instance: best,
+        score: bestScore,
+      };
+    }
+    const err = new Error(
+      `No bridge instance matched workspace "${query}".\n` +
+        formatInstances(instances) +
+        `\nTip: cursor-browser --workspace af-exec-travel status`
+    );
+    err.code = "NO_MATCH";
+    throw err;
+  }
+
+  // Match cwd
+  const cwd = process.cwd();
+  let best = null;
+  let bestScore = 0;
+  for (const inst of instances) {
+    const s = scoreInstance(inst, cwd);
+    if (s > bestScore) {
+      bestScore = s;
+      best = inst;
+    }
+  }
+  if (best && bestScore >= 70) {
+    return {
+      port: best.port,
+      how: "cwd",
+      instance: best,
+      score: bestScore,
+    };
+  }
+
+  if (instances.length === 1) {
+    return {
+      port: instances[0].port,
+      how: "single-instance",
+      instance: instances[0],
+    };
+  }
+
+  // Ambiguous
+  const err = new Error(
+    `Multiple Cursor windows have Browser Bridge running; cannot pick from cwd (${cwd}).\n` +
+      formatInstances(instances) +
+      `\nUse: cursor-browser --workspace <name-or-path> <cmd>\n` +
+      `  or: cd into the project folder first\n` +
+      `  or: CURSOR_BROWSER_WORKSPACE=af-exec-travel cursor-browser ...`
+  );
+  err.code = "AMBIGUOUS";
+  throw err;
+}
+
+function formatInstances(instances) {
+  if (!instances.length) return "  (none)";
+  return instances
+    .map(
+      (i) =>
+        `  :${i.port}  ${(i.primaryName || "?").padEnd(20)}  ${i.primaryPath || ""}${
+          i.tabsHint ? "" : ""
+        }`
+    )
+    .join("\n");
+}
+
+function request(method, pathname, body, port) {
   const payload = body ? JSON.stringify(body) : null;
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -39,9 +202,7 @@ function request(method, pathname, body) {
         method,
         headers: {
           "Content-Type": "application/json",
-          ...(payload
-            ? { "Content-Length": Buffer.byteLength(payload) }
-            : {}),
+          ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
         },
         timeout: 30000,
       },
@@ -64,7 +225,7 @@ function request(method, pathname, body) {
       reject(
         new Error(
           `Cannot reach Cursor Browser Bridge on 127.0.0.1:${port} (${err.message}).\n` +
-            `Is Cursor open with the cursor-browser-bridge extension installed and activated?`
+            `Is Cursor open with cursor-browser-bridge installed in that window?`
         )
       );
     });
@@ -77,8 +238,32 @@ function request(method, pathname, body) {
   });
 }
 
-async function action(body) {
-  return request("POST", "/action", body);
+function saveScreenshot(r, outPath) {
+  if (!r || typeof r !== "object") {
+    return { path: outPath, bytes: 0 };
+  }
+  if (r.savedPath && fs.existsSync(r.savedPath)) {
+    fs.copyFileSync(r.savedPath, outPath);
+    const st = fs.statSync(outPath);
+    return { path: outPath, bytes: st.size, copiedFrom: r.savedPath };
+  }
+  if (typeof r.dataUrl === "string" && r.dataUrl.startsWith("data:")) {
+    const b64 = r.dataUrl.replace(/^data:image\/\w+;base64,/, "");
+    const buf = Buffer.from(b64, "base64");
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, buf);
+    return { path: outPath, bytes: buf.length };
+  }
+  if (typeof r.data === "string") {
+    const buf = Buffer.from(
+      r.data,
+      r.encoding === "base64" || !r.encoding ? "base64" : r.encoding
+    );
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, buf);
+    return { path: outPath, bytes: buf.length };
+  }
+  return { path: outPath, bytes: 0, warning: "No image payload to save" };
 }
 
 function print(data) {
@@ -90,43 +275,128 @@ function print(data) {
 }
 
 function usage() {
-  console.log(`cursor-browser — drive Cursor's Browser Tab via the bridge extension
+  console.log(`cursor-browser — drive Cursor's Browser Tab (per project window)
 
 Usage:
-  cursor-browser status
-  cursor-browser probe
-  cursor-browser open <url>
-  cursor-browser nav|navigate <url>
-  cursor-browser tabs
-  cursor-browser url
-  cursor-browser title
-  cursor-browser snap [path.png]
-  cursor-browser eval <js>
-  cursor-browser back | forward | reload
-  cursor-browser select <viewId>
-  cursor-browser cdp <Method> [json-params]
+  cursor-browser [--workspace <name|path>] [--port N] <command>
 
-Env:
-  CURSOR_BROWSER_BRIDGE_PORT   override port (default: ~/.cursor-browser-bridge/port or 17373)
+Commands:
+  windows | list          List bridge instances (one per Cursor window)
+  status                  Health + workspace for the resolved window
+  whoami                  Which window this CLI would hit
+  probe
+  open <url>              Open Browser Tab IN THAT window + navigate
+  nav|navigate <url>
+  tabs | url | title
+  snap [path.png]
+  eval <js>
+  back | forward | reload
+  select <viewId>
+  cdp <Method> [json]
+
+Routing (important with multiple Cursor windows):
+  1. --port N / CURSOR_BROWSER_BRIDGE_PORT
+  2. --workspace af-exec-travel  (or full path)
+  3. Match process cwd to a registered workspace folder
+  4. Only one window open → use it
+
+Examples:
+  cd ~/Developer/af-exec-travel && cursor-browser open http://localhost:3000
+  cursor-browser --workspace af-exec-travel open http://localhost:3000
+  cursor-browser windows
 `);
 }
 
-async function main() {
-  const [cmd, ...rest] = process.argv.slice(2);
-  if (!cmd || cmd === "-h" || cmd === "--help" || cmd === "help") {
-    usage();
-    process.exit(0);
+function parseArgs(argv) {
+  const opts = { workspace: null, port: null, rest: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--workspace" || a === "-w" || a === "--project") {
+      opts.workspace = argv[++i];
+    } else if (a === "--port" || a === "-p") {
+      opts.port = Number(argv[++i]);
+    } else if (a.startsWith("--workspace=")) {
+      opts.workspace = a.slice("--workspace=".length);
+    } else if (a.startsWith("--port=")) {
+      opts.port = Number(a.slice("--port=".length));
+    } else if (a === "-h" || a === "--help") {
+      opts.help = true;
+    } else {
+      opts.rest.push(a);
+    }
   }
+  return opts;
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help || opts.rest.length === 0) {
+    usage();
+    process.exit(opts.help ? 0 : 1);
+  }
+
+  const [cmd, ...rest] = opts.rest;
+
+  // windows/list does not need a target
+  if (cmd === "windows" || cmd === "list" || cmd === "instances") {
+    const instances = listInstances();
+    if (!instances.length) {
+      print({ ok: true, instances: [], note: "No bridges registered. Reload Cursor windows." });
+      return;
+    }
+    // Enrich with live status when possible
+    const enriched = [];
+    for (const inst of instances) {
+      try {
+        const r = await request("GET", "/whoami", null, inst.port);
+        enriched.push({
+          port: inst.port,
+          primaryName: r.data.workspace?.primaryName || inst.primaryName,
+          primaryPath: r.data.workspace?.primaryPath || inst.primaryPath,
+          instanceId: r.data.instanceId || inst.id,
+          live: true,
+        });
+      } catch {
+        enriched.push({
+          port: inst.port,
+          primaryName: inst.primaryName,
+          primaryPath: inst.primaryPath,
+          live: false,
+        });
+      }
+    }
+    print({ ok: true, instances: enriched, cwd: process.cwd() });
+    return;
+  }
+
+  let target;
+  try {
+    target = resolveTarget(opts);
+  } catch (err) {
+    console.error(err.message || err);
+    process.exit(1);
+  }
+
+  const port = target.port;
+  const action = (body) => request("POST", "/action", body, port);
+  const get = (pathname) => request("GET", pathname, null, port);
 
   try {
     let res;
     switch (cmd) {
       case "status":
       case "health":
-        res = await request("GET", "/status");
+        res = await get("/status");
+        break;
+      case "whoami":
+        res = await get("/whoami");
+        res.data = {
+          ...res.data,
+          routing: { how: target.how, score: target.score, cwd: process.cwd() },
+        };
         break;
       case "probe":
-        res = await request("GET", "/probe");
+        res = await get("/probe");
         break;
       case "open":
         if (!rest[0]) throw new Error("url required");
@@ -151,18 +421,18 @@ async function main() {
         const outPath = rest[0] || path.join(os.tmpdir(), "cursor-browser-snap.png");
         res = await action({ action: "screenshot", path: outPath });
         if (res.data && res.data.ok !== false) {
-          // If result includes base64, write it
           const r = res.data.result || res.data;
-          if (r && r.data && typeof r.data === "string") {
-            const buf = Buffer.from(r.data, r.encoding === "base64" || !r.encoding ? "base64" : r.encoding);
-            fs.writeFileSync(outPath, buf);
-            res.data.savedTo = outPath;
-          } else if (r && r.path) {
-            res.data.savedTo = r.path;
-          } else {
-            res.data.note = `Requested screenshot; saved path hint: ${outPath}`;
-            res.data.savedTo = outPath;
+          const saved = saveScreenshot(r, outPath);
+          if (res.data.result && typeof res.data.result === "object") {
+            const slim = { ...res.data.result };
+            delete slim.dataUrl;
+            delete slim.data;
+            res.data.result = slim;
           }
+          res.data.savedTo = saved.path;
+          res.data.bytes = saved.bytes;
+          if (saved.copiedFrom) res.data.copiedFrom = saved.copiedFrom;
+          if (saved.warning) res.data.warning = saved.warning;
         }
         break;
       }
@@ -197,6 +467,17 @@ async function main() {
         process.exit(1);
     }
 
+    // Annotate with routing for clarity
+    if (res.data && typeof res.data === "object") {
+      res.data._bridge = {
+        port,
+        how: target.how,
+        workspace:
+          target.instance?.primaryName ||
+          res.data.workspace?.primaryName ||
+          null,
+      };
+    }
     print(res.data !== undefined ? res.data : res);
     if (res.data && res.data.ok === false) process.exit(2);
   } catch (err) {

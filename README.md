@@ -53,11 +53,31 @@ cursor-browser open http://localhost:3000
 cursor-browser snap
 ```
 
+## Multi-window / same project
+
+Each Cursor **window** runs its own bridge on a free port and registers under
+`~/.cursor-browser-bridge/instances.json`. The CLI routes by:
+
+1. `--port N` / `CURSOR_BROWSER_BRIDGE_PORT`
+2. `--workspace af-exec-travel` (name or path) / `CURSOR_BROWSER_WORKSPACE`
+3. Matching `cwd` to a registered workspace folder
+4. The only open instance (if just one)
+
+```bash
+cursor-browser windows                                    # list windows
+cursor-browser --workspace af-exec-travel whoami          # confirm target
+cd ~/Developer/af-exec-travel && cursor-browser open http://localhost:3000
+```
+
+Status bar in each window: `af-exec-travel :17375` (name + port).
+
 ## CLI
 
 ```bash
-cursor-browser status              # bridge health + open tabs
-cursor-browser open <url>          # open/focus browser and navigate
+cursor-browser windows             # all Cursor windows with a bridge
+cursor-browser status              # bridge health + open tabs (routed)
+cursor-browser whoami              # which workspace this CLI will hit
+cursor-browser open <url>          # open/focus browser IN that window
 cursor-browser nav <url>           # navigate active tab
 cursor-browser tabs                # list tabs
 cursor-browser url                 # current URL
@@ -67,6 +87,7 @@ cursor-browser eval 'document.title'
 cursor-browser back | forward | reload
 cursor-browser cdp <Method> [json] # raw CDP (Page.reload, etc.)
 ```
+
 
 ## MCP tools
 

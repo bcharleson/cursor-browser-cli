@@ -2,12 +2,14 @@
   "name": "cursor-browser-bridge",
   "displayName": "Cursor Browser Bridge",
   "description": "Expose Cursor Browser Tab controls to Grok Build / CLI over localhost HTTP",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
     "onStartupFinished"
   ],
