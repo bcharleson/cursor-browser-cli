@@ -1,36 +1,39 @@
 #!/usr/bin/env node
 /**
- * cursor-browser — CLI client for Cursor Browser Bridge
- *
- * Multi-window aware: routes to the bridge instance whose workspace
- * matches cwd (or --workspace / CURSOR_BROWSER_WORKSPACE).
+ * cursor-browser — CLI for Cursor Browser CLI
+ * Multi-window aware client for the Cursor Browser Tab bridge.
  */
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const http = require("http");
+const { execSync } = require("child_process");
 
-const STATE_DIR = path.join(os.homedir(), ".cursor-browser-bridge");
+const STATE_DIR = path.join(os.homedir(), ".cursor-browser-cli");
 const INSTANCES_FILE = path.join(STATE_DIR, "instances.json");
 const PORT_FILE = path.join(STATE_DIR, "port");
+const LEGACY_INSTANCES = path.join(
+  os.homedir(),
+  ".cursor-browser-bridge",
+  "instances.json"
+);
+const LEGACY_PORT = path.join(os.homedir(), ".cursor-browser-bridge", "port");
 const DEFAULT_PORT = 17373;
 
 function readInstances() {
-  try {
-    if (!fs.existsSync(INSTANCES_FILE)) return {};
-    return JSON.parse(fs.readFileSync(INSTANCES_FILE, "utf8") || "{}");
-  } catch {
-    return {};
+  for (const f of [INSTANCES_FILE, LEGACY_INSTANCES]) {
+    try {
+      if (fs.existsSync(f)) {
+        return JSON.parse(fs.readFileSync(f, "utf8") || "{}");
+      }
+    } catch {
+      /* ignore */
+    }
   }
+  return {};
 }
 
-/**
- * Discover bridges by scanning listeners + Cursor extension-host process names.
- * Works even before v0.2 instances.json registration (after window reload).
- * Process title looks like: "extension-host (user) af-exec-travel [3-2]"
- */
 function discoverInstancesFromProcesses() {
-  const { execSync } = require("child_process");
   const found = [];
   try {
     const lsof = execSync(
@@ -51,10 +54,7 @@ function discoverInstancesFromProcesses() {
         const ps = execSync(`ps -p ${pid} -o command= 2>/dev/null || true`, {
           encoding: "utf8",
         });
-        // "Cursor Helper (Plugin): extension-host (user) af-exec-travel [3-2]"
-        const mm = ps.match(
-          /extension-host\s+\([^)]+\)\s+([^\s\[]+)/i
-        );
+        const mm = ps.match(/extension-host\s+\([^)]+\)\s+([^\s\[]+)/i);
         if (mm) primaryName = mm[1].trim();
       } catch {
         /* ignore */
@@ -82,98 +82,71 @@ function discoverInstancesFromProcesses() {
 }
 
 function listInstances() {
-  const map = readInstances();
-  const registered = Object.values(map);
+  const registered = Object.values(readInstances());
   if (registered.length) {
     return registered.sort((a, b) =>
       String(a.primaryName || "").localeCompare(String(b.primaryName || ""))
     );
   }
-  // Fallback: live process discovery (multi-window without reload)
   return discoverInstancesFromProcesses().sort((a, b) =>
     String(a.primaryName || "").localeCompare(String(b.primaryName || ""))
   );
 }
 
-function isAlive(inst) {
-  if (!inst || !inst.port) return false;
-  if (inst.pid) {
-    try {
-      process.kill(inst.pid, 0);
-    } catch {
-      // pid dead — still try HTTP; extension host pid may differ from registered
-    }
-  }
-  return true;
-}
-
-/**
- * Score how well an instance matches a query path or name.
- */
 function scoreInstance(inst, query) {
   if (!query) return 0;
   const q = path.resolve(query);
   const qBase = path.basename(q).toLowerCase();
-  const qLower = query.toLowerCase();
+  const qLower = String(query).toLowerCase();
   let score = 0;
-
   const paths = inst.workspacePaths || (inst.primaryPath ? [inst.primaryPath] : []);
   const names = inst.workspaceNames || (inst.primaryName ? [inst.primaryName] : []);
   const bases = inst.basenames || paths.map((p) => path.basename(p));
-
   for (const p of paths) {
     const rp = path.resolve(p);
     if (q === rp) score = Math.max(score, 100);
     else if (q.startsWith(rp + path.sep)) score = Math.max(score, 90);
-    else if (rp.startsWith(q + path.sep)) score = Math.max(score, 70);
   }
   for (const b of bases) {
-    if (b.toLowerCase() === qBase || b.toLowerCase() === qLower) score = Math.max(score, 80);
-    else if (b.toLowerCase().includes(qLower) || qLower.includes(b.toLowerCase()))
-      score = Math.max(score, 50);
+    if (b.toLowerCase() === qBase || b.toLowerCase() === qLower)
+      score = Math.max(score, 80);
   }
   for (const n of names) {
     if (n.toLowerCase() === qLower) score = Math.max(score, 85);
-    else if (n.toLowerCase().includes(qLower)) score = Math.max(score, 55);
   }
   return score;
 }
 
-/**
- * Resolve which bridge port to use.
- * Priority:
- *  1. --port / CURSOR_BROWSER_BRIDGE_PORT
- *  2. --workspace / CURSOR_BROWSER_WORKSPACE (name or path)
- *  3. Match process.cwd() against registered workspaces
- *  4. Single instance only
- *  5. Fail with helpful list
- */
 function resolveTarget(opts = {}) {
-  if (opts.port || process.env.CURSOR_BROWSER_BRIDGE_PORT) {
+  if (opts.port || process.env.CURSOR_BROWSER_BRIDGE_PORT || process.env.CURSOR_BROWSER_CLI_PORT) {
     return {
-      port: Number(opts.port || process.env.CURSOR_BROWSER_BRIDGE_PORT),
+      port: Number(
+        opts.port ||
+          process.env.CURSOR_BROWSER_CLI_PORT ||
+          process.env.CURSOR_BROWSER_BRIDGE_PORT
+      ),
       how: "explicit-port",
     };
   }
-
-  const instances = listInstances().filter(isAlive);
+  const instances = listInstances();
   const query =
     opts.workspace ||
     process.env.CURSOR_BROWSER_WORKSPACE ||
     process.env.CURSOR_BROWSER_PROJECT ||
     null;
 
-  if (instances.length === 0) {
-    // legacy single port file
-    try {
-      if (fs.existsSync(PORT_FILE)) {
-        const n = Number(fs.readFileSync(PORT_FILE, "utf8").trim());
-        if (n > 0) return { port: n, how: "legacy-port-file" };
+  if (!instances.length) {
+    for (const f of [PORT_FILE, LEGACY_PORT]) {
+      try {
+        if (fs.existsSync(f)) {
+          const n = Number(fs.readFileSync(f, "utf8").trim());
+          if (n > 0) return { port: n, how: "port-file" };
+        }
+      } catch {
+        /* ignore */
       }
-    } catch {
-      /* ignore */
     }
-    return { port: DEFAULT_PORT, how: "default", warning: "no instances registered" };
+    return { port: DEFAULT_PORT, how: "default" };
   }
 
   if (query) {
@@ -187,23 +160,14 @@ function resolveTarget(opts = {}) {
       }
     }
     if (best && bestScore >= 50) {
-      return {
-        port: best.port,
-        how: "workspace-query",
-        instance: best,
-        score: bestScore,
-      };
+      return { port: best.port, how: "workspace-query", instance: best, score: bestScore };
     }
-    const err = new Error(
-      `No bridge instance matched workspace "${query}".\n` +
-        formatInstances(instances) +
-        `\nTip: cursor-browser --workspace af-exec-travel status`
+    throw new Error(
+      `No bridge matched workspace "${query}".\n` +
+        instances.map((i) => `  :${i.port}  ${i.primaryName || "?"}  ${i.primaryPath || ""}`).join("\n")
     );
-    err.code = "NO_MATCH";
-    throw err;
   }
 
-  // Match cwd
   const cwd = process.cwd();
   let best = null;
   let bestScore = 0;
@@ -215,44 +179,16 @@ function resolveTarget(opts = {}) {
     }
   }
   if (best && bestScore >= 70) {
-    return {
-      port: best.port,
-      how: "cwd",
-      instance: best,
-      score: bestScore,
-    };
+    return { port: best.port, how: "cwd", instance: best, score: bestScore };
   }
-
   if (instances.length === 1) {
-    return {
-      port: instances[0].port,
-      how: "single-instance",
-      instance: instances[0],
-    };
+    return { port: instances[0].port, how: "single-instance", instance: instances[0] };
   }
-
-  // Ambiguous
-  const err = new Error(
-    `Multiple Cursor windows have Browser Bridge running; cannot pick from cwd (${cwd}).\n` +
-      formatInstances(instances) +
-      `\nUse: cursor-browser --workspace <name-or-path> <cmd>\n` +
-      `  or: cd into the project folder first\n` +
-      `  or: CURSOR_BROWSER_WORKSPACE=af-exec-travel cursor-browser ...`
+  throw new Error(
+    `Multiple Cursor windows; pick one:\n` +
+      instances.map((i) => `  :${i.port}  ${i.primaryName || "?"}`).join("\n") +
+      `\nUse: cursor-browser --workspace <name> <cmd>`
   );
-  err.code = "AMBIGUOUS";
-  throw err;
-}
-
-function formatInstances(instances) {
-  if (!instances.length) return "  (none)";
-  return instances
-    .map(
-      (i) =>
-        `  :${i.port}  ${(i.primaryName || "?").padEnd(20)}  ${i.primaryPath || ""}${
-          i.tabsHint ? "" : ""
-        }`
-    )
-    .join("\n");
 }
 
 function request(method, pathname, body, port) {
@@ -268,7 +204,7 @@ function request(method, pathname, body, port) {
           "Content-Type": "application/json",
           ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
         },
-        timeout: 30000,
+        timeout: 60000,
       },
       (res) => {
         const chunks = [];
@@ -279,7 +215,7 @@ function request(method, pathname, body, port) {
           try {
             data = raw ? JSON.parse(raw) : {};
           } catch {
-            data = { ok: false, error: "Non-JSON response", raw };
+            data = { ok: false, error: "Non-JSON", raw };
           }
           resolve({ status: res.statusCode, data, port });
         });
@@ -288,14 +224,14 @@ function request(method, pathname, body, port) {
     req.on("error", (err) => {
       reject(
         new Error(
-          `Cannot reach Cursor Browser Bridge on 127.0.0.1:${port} (${err.message}).\n` +
-            `Is Cursor open with cursor-browser-bridge installed in that window?`
+          `Cannot reach cursor-browser-cli on 127.0.0.1:${port} (${err.message}).\n` +
+            `Reload Cursor window after ./scripts/install.sh`
         )
       );
     });
     req.on("timeout", () => {
       req.destroy();
-      reject(new Error(`Timeout talking to bridge on port ${port}`));
+      reject(new Error(`Timeout on port ${port}`));
     });
     if (payload) req.write(payload);
     req.end();
@@ -303,13 +239,10 @@ function request(method, pathname, body, port) {
 }
 
 function saveScreenshot(r, outPath) {
-  if (!r || typeof r !== "object") {
-    return { path: outPath, bytes: 0 };
-  }
+  if (!r || typeof r !== "object") return { path: outPath, bytes: 0 };
   if (r.savedPath && fs.existsSync(r.savedPath)) {
     fs.copyFileSync(r.savedPath, outPath);
-    const st = fs.statSync(outPath);
-    return { path: outPath, bytes: st.size, copiedFrom: r.savedPath };
+    return { path: outPath, bytes: fs.statSync(outPath).size, copiedFrom: r.savedPath };
   }
   if (typeof r.dataUrl === "string" && r.dataUrl.startsWith("data:")) {
     const b64 = r.dataUrl.replace(/^data:image\/\w+;base64,/, "");
@@ -318,105 +251,99 @@ function saveScreenshot(r, outPath) {
     fs.writeFileSync(outPath, buf);
     return { path: outPath, bytes: buf.length };
   }
-  if (typeof r.data === "string") {
-    const buf = Buffer.from(
-      r.data,
-      r.encoding === "base64" || !r.encoding ? "base64" : r.encoding
-    );
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    fs.writeFileSync(outPath, buf);
-    return { path: outPath, bytes: buf.length };
-  }
-  return { path: outPath, bytes: 0, warning: "No image payload to save" };
+  return { path: outPath, bytes: 0, warning: "No image payload" };
 }
 
 function print(data) {
   if (typeof data === "string") {
-    process.stdout.write(data + (data.endsWith("\n") ? "" : "\n"));
+    process.stdout.write(data.endsWith("\n") ? data : data + "\n");
+    return;
+  }
+  // Prefer snapshot text for readability
+  if (data?.result?.text && data.result.yaml !== undefined) {
+    process.stdout.write(data.result.text);
+    if (!data.result.text.endsWith("\n")) process.stdout.write("\n");
     return;
   }
   process.stdout.write(JSON.stringify(data, null, 2) + "\n");
 }
 
 function usage() {
-  console.log(`cursor-browser — drive Cursor's Browser Tab (per project window)
+  console.log(`cursor-browser — CLI for Cursor IDE Browser Tab (cursor-browser-cli)
 
 Usage:
   cursor-browser [--workspace <name|path>] [--port N] <command>
 
-Commands:
-  windows | list          List bridge instances (one per Cursor window)
-  status                  Health + workspace for the resolved window
-  whoami                  Which window this CLI would hit
-  probe
-  open <url>              Reuse single tab if present (closes extras)
-  nav|navigate <url>      Navigate active tab only (never opens a new tab)
-  tabs | close            List tabs / close extras (keep one)
-  click <selector>        Click element
-  type <selector> <text>  Type/fill into element
-  press Enter|Tab|Escape  Key / form submit
-  url | title
-  snap [path.png]         Screenshot (PNG)
-  eval <js>               Run JS in page
-  inspect | dom           Under-the-hood page structure (meta, links, inputs, text)
-  a11y | snapshot         Lightweight accessibility tree
-  console | logs          Browser console messages
-  network                 Network request log
-  back | forward | reload
-  select <viewId>
-  cdp <Method> [json]     Raw CDP when allowed
+Routing:
+  windows              List Cursor windows with a bridge
+  whoami | status      Target window + health
 
-Routing (important with multiple Cursor windows):
-  1. --port N / CURSOR_BROWSER_BRIDGE_PORT
-  2. --workspace af-exec-travel  (or full path)
-  3. Match process cwd to a registered workspace folder
-  4. Only one window open → use it
+Tabs / nav:
+  open <url>           Single-tab open + navigate + snapshot
+  nav <url>            Navigate active tab + snapshot
+  tabs | close         List / keep one tab
+  lock | unlock        Lock tab from human input
+  back | forward | reload
+
+Interact (prefer ref from snapshot):
+  snap | snapshot [--interactive]
+  click <ref|selector>
+  type <ref|selector> <text>
+  fill <ref|selector> <text>
+  hover <ref>
+  press Enter|Tab|Escape
+
+Under the hood:
+  inspect | dom
+  console | logs
+  network
+  eval <js>
+  wait [--url substr] [--text str] [--ref e1] [--selector css] [--timeout ms]
+  resize <W> <H>
+  screenshot [path.png]
 
 Examples:
-  cd ~/Developer/af-exec-travel && cursor-browser open http://localhost:3000
   cursor-browser --workspace af-exec-travel open http://localhost:3000
-  cursor-browser windows
+  cursor-browser --workspace af-exec-travel snapshot
+  cursor-browser --workspace af-exec-travel click e5
+  cursor-browser --workspace af-exec-travel fill e3 "hello"
+  cursor-browser --workspace af-exec-travel wait --url /dashboard --timeout 15000
 `);
 }
 
 function parseArgs(argv) {
-  const opts = { workspace: null, port: null, rest: [] };
+  const opts = { workspace: null, port: null, rest: [], flags: {} };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--workspace" || a === "-w" || a === "--project") {
-      opts.workspace = argv[++i];
-    } else if (a === "--port" || a === "-p") {
-      opts.port = Number(argv[++i]);
-    } else if (a.startsWith("--workspace=")) {
-      opts.workspace = a.slice("--workspace=".length);
-    } else if (a.startsWith("--port=")) {
-      opts.port = Number(a.slice("--port=".length));
-    } else if (a === "-h" || a === "--help") {
-      opts.help = true;
-    } else {
-      opts.rest.push(a);
-    }
+    if (a === "--workspace" || a === "-w" || a === "--project") opts.workspace = argv[++i];
+    else if (a === "--port" || a === "-p") opts.port = Number(argv[++i]);
+    else if (a.startsWith("--workspace=")) opts.workspace = a.slice(12);
+    else if (a === "--interactive") opts.flags.interactive = true;
+    else if (a === "--url") opts.flags.urlContains = argv[++i];
+    else if (a === "--text") opts.flags.text = argv[++i];
+    else if (a === "--ref") opts.flags.ref = argv[++i];
+    else if (a === "--selector") opts.flags.selector = argv[++i];
+    else if (a === "--timeout") opts.flags.timeoutMs = Number(argv[++i]);
+    else if (a === "-h" || a === "--help") opts.help = true;
+    else opts.rest.push(a);
   }
   return opts;
 }
 
+function looksLikeRef(s) {
+  return /^e\d+$/i.test(s) || s === "root";
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
-  if (opts.help || opts.rest.length === 0) {
+  if (opts.help || !opts.rest.length) {
     usage();
     process.exit(opts.help ? 0 : 1);
   }
-
   const [cmd, ...rest] = opts.rest;
 
-  // windows/list does not need a target
-  if (cmd === "windows" || cmd === "list" || cmd === "instances") {
+  if (cmd === "windows" || cmd === "list") {
     const instances = listInstances();
-    if (!instances.length) {
-      print({ ok: true, instances: [], note: "No bridges registered. Reload Cursor windows." });
-      return;
-    }
-    // Enrich with live status when possible
     const enriched = [];
     for (const inst of instances) {
       try {
@@ -425,14 +352,13 @@ async function main() {
           port: inst.port,
           primaryName: r.data.workspace?.primaryName || inst.primaryName,
           primaryPath: r.data.workspace?.primaryPath || inst.primaryPath,
-          instanceId: r.data.instanceId || inst.id,
+          version: r.data.version,
           live: true,
         });
       } catch {
         enriched.push({
           port: inst.port,
           primaryName: inst.primaryName,
-          primaryPath: inst.primaryPath,
           live: false,
         });
       }
@@ -448,10 +374,9 @@ async function main() {
     console.error(err.message || err);
     process.exit(1);
   }
-
   const port = target.port;
   const action = (body) => request("POST", "/action", body, port);
-  const get = (pathname) => request("GET", pathname, null, port);
+  const get = (p) => request("GET", p, null, port);
 
   try {
     let res;
@@ -472,189 +397,116 @@ async function main() {
         break;
       case "open":
         if (!rest[0]) throw new Error("url required");
-        // Prefer single-tab: if tabs already exist, navigate instead of open/newTab
-        {
-          const t = await action({ action: "tabs" });
-          const ids =
-            t.data?.result?.tabs ||
-            t.data?.tabs?.tabs ||
-            [];
-          if (Array.isArray(ids) && ids.length > 0) {
-            // close extras when extension supports it
-            if (ids.length > 1) {
-              await action({ action: "close" }).catch(() => null);
-            }
-            res = await action({ action: "navigate", url: rest[0] });
-            if (res.data && typeof res.data === "object") {
-              res.data.reusedTab = true;
-              res.data.viewId = ids[0];
-            }
-          } else {
-            res = await action({ action: "open", url: rest[0] });
-          }
-        }
+        res = await action({
+          action: "open",
+          url: rest[0],
+          interactive: true,
+        });
         break;
       case "nav":
       case "navigate":
         if (!rest[0]) throw new Error("url required");
-        res = await action({ action: "navigate", url: rest[0] });
+        res = await action({
+          action: "navigate",
+          url: rest[0],
+          interactive: true,
+        });
         break;
       case "tabs":
         res = await action({ action: "tabs" });
         break;
       case "close":
-      case "close-extras":
-        // close all but first tab (extension action) or no-op
+        res = await action({ action: "close", viewId: rest[0] });
+        break;
+      case "lock":
+        res = await action({ action: "lock" });
+        break;
+      case "unlock":
+        res = await action({ action: "unlock" });
+        break;
+      case "snap":
+      case "snapshot":
+      case "refs":
         res = await action({
-          action: "close",
-          viewId: rest[0] || undefined,
+          action: "snapshot",
+          interactive: opts.flags.interactive !== false,
         });
         break;
       case "click": {
-        // cursor-browser click <selector>
-        // cursor-browser click --xy 100,200
-        if (!rest[0]) throw new Error("selector or --xy x,y required");
-        if (rest[0] === "--xy" || rest[0] === "-xy") {
-          const [x, y] = (rest[1] || "").split(",").map(Number);
-          res = await action({ action: "click", x, y });
-          // Fallback via CDP if extension lacks click
-          if (res.data && res.data.ok === false) {
-            await action({
-              action: "cdp",
-              method: "Input.dispatchMouseEvent",
-              params: {
-                type: "mousePressed",
-                x,
-                y,
-                button: "left",
-                clickCount: 1,
-              },
-            });
-            res = await action({
-              action: "cdp",
-              method: "Input.dispatchMouseEvent",
-              params: {
-                type: "mouseReleased",
-                x,
-                y,
-                button: "left",
-                clickCount: 1,
-              },
-            });
-          }
-        } else {
-          const selector = rest.join(" ");
-          res = await action({ action: "click", selector });
-          if (res.data && res.data.ok === false) {
-            // JS click fallback (works on 0.1.0 bridge)
-            const script = `(() => {
-              const el = document.querySelector(${JSON.stringify(selector)});
-              if (!el) return { ok:false, error:'not found' };
-              el.scrollIntoView({block:'center'});
-              el.focus({preventScroll:true});
-              el.click();
-              const r = el.getBoundingClientRect();
-              return { ok:true, tag: el.tagName, box:{x:r.x,y:r.y,w:r.width,h:r.height} };
-            })()`;
-            res = await action({ action: "evaluate", script });
-          }
-        }
+        if (!rest[0]) throw new Error("ref or selector required");
+        const targetEl = rest[0];
+        res = await action(
+          looksLikeRef(targetEl)
+            ? { action: "click", ref: targetEl }
+            : { action: "click", selector: rest.join(" ") }
+        );
         break;
       }
       case "type":
       case "fill": {
-        // cursor-browser type <selector> <text...>
-        // cursor-browser type --text hello world  (focused element)
-        if (!rest[0]) throw new Error("usage: type <selector> <text> | type --text <text>");
-        let selector = null;
-        let text = "";
-        if (rest[0] === "--text") {
-          text = rest.slice(1).join(" ");
-        } else {
-          selector = rest[0];
-          text = rest.slice(1).join(" ");
-        }
+        if (rest.length < 2) throw new Error(`${cmd} <ref|selector> <text>`);
+        const t = rest[0];
+        const value = rest.slice(1).join(" ");
+        res = await action(
+          looksLikeRef(t)
+            ? { action: cmd, ref: t, text: value, value }
+            : { action: cmd, selector: t, text: value, value }
+        );
+        break;
+      }
+      case "hover":
+        if (!rest[0]) throw new Error("ref required");
+        res = await action({ action: "hover", ref: rest[0] });
+        break;
+      case "press":
+        if (!rest[0]) throw new Error("key required");
+        res = await action({ action: "press", key: rest[0] });
+        break;
+      case "wait":
+      case "wait-for":
         res = await action({
-          action: "type",
-          selector,
-          text,
-          clear: true,
+          action: "wait",
+          urlContains: opts.flags.urlContains,
+          text: opts.flags.text,
+          ref: opts.flags.ref,
+          selector: opts.flags.selector || rest[0],
+          timeoutMs: opts.flags.timeoutMs || 30000,
         });
-        if (res.data && res.data.ok === false) {
-          if (selector) {
-            const script = `(() => {
-              const el = document.querySelector(${JSON.stringify(selector)});
-              if (!el) return { ok:false, error:'not found' };
-              el.focus({preventScroll:true});
-              if ('value' in el) {
-                const proto = Object.getOwnPropertyDescriptor(
-                  el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
-                  'value'
-                );
-                if (proto && proto.set) proto.set.call(el, ${JSON.stringify(text)});
-                else el.value = ${JSON.stringify(text)};
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                return { ok:true, value: el.value };
-              }
-              if (el.isContentEditable) {
-                el.textContent = ${JSON.stringify(text)};
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                return { ok:true, value: el.textContent };
-              }
-              return { ok:false, error:'not typeable' };
-            })()`;
-            res = await action({ action: "evaluate", script });
-          } else {
-            res = await action({
-              action: "cdp",
-              method: "Input.insertText",
-              params: { text },
-            });
-          }
-        }
         break;
-      }
-      case "press": {
-        if (!rest[0]) throw new Error("key required (Enter, Tab, Escape, ...)");
-        const key = rest[0];
-        res = await action({ action: "press", key });
-        if (res.data && res.data.ok === false) {
-          const map = {
-            Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" },
-            Tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
-            Escape: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
-          };
-          const spec = map[key] || { key, code: key };
-          await action({
-            action: "cdp",
-            method: "Input.dispatchKeyEvent",
-            params: { type: "keyDown", ...spec },
-          });
-          res = await action({
-            action: "cdp",
-            method: "Input.dispatchKeyEvent",
-            params: {
-              type: "keyUp",
-              key: spec.key,
-              code: spec.code,
-              windowsVirtualKeyCode: spec.windowsVirtualKeyCode,
-            },
-          });
-        }
+      case "resize":
+        if (rest.length < 2) throw new Error("resize <width> <height>");
+        res = await action({
+          action: "resize",
+          width: Number(rest[0]),
+          height: Number(rest[1]),
+        });
         break;
-      }
       case "url":
         res = await action({ action: "url" });
         break;
       case "title":
         res = await action({ action: "title" });
         break;
-      case "snap":
+      case "inspect":
+      case "dom":
+        res = await action({ action: "inspect" });
+        break;
+      case "console":
+      case "logs":
+        res = await action({ action: "console" });
+        break;
+      case "network":
+        res = await action({ action: "network" });
+        break;
+      case "eval":
+      case "evaluate":
+        if (!rest[0]) throw new Error("js required");
+        res = await action({ action: "evaluate", script: rest.join(" ") });
+        break;
       case "screenshot": {
-        const outPath = rest[0] || path.join(os.tmpdir(), "cursor-browser-snap.png");
+        const outPath = rest[0] || path.join(os.tmpdir(), "cursor-browser.png");
         res = await action({ action: "screenshot", path: outPath });
-        if (res.data && res.data.ok !== false) {
+        if (res.data?.ok !== false) {
           const r = res.data.result || res.data;
           const saved = saveScreenshot(r, outPath);
           if (res.data.result && typeof res.data.result === "object") {
@@ -665,35 +517,9 @@ async function main() {
           }
           res.data.savedTo = saved.path;
           res.data.bytes = saved.bytes;
-          if (saved.copiedFrom) res.data.copiedFrom = saved.copiedFrom;
-          if (saved.warning) res.data.warning = saved.warning;
         }
         break;
       }
-      case "eval":
-      case "evaluate":
-        if (!rest[0]) throw new Error("js expression/script required");
-        res = await action({ action: "evaluate", script: rest.join(" ") });
-        break;
-      case "console":
-      case "logs":
-        res = await action({ action: "console" });
-        break;
-      case "network":
-        res = await action({ action: "network" });
-        break;
-      case "inspect":
-      case "dom":
-      case "underhood":
-        res = await action({ action: "inspect" });
-        break;
-      case "a11y":
-      case "snapshot":
-        res = await action({
-          action: "a11y",
-          maxNodes: rest[0] ? Number(rest[0]) : 200,
-        });
-        break;
       case "back":
         res = await action({ action: "back" });
         break;
@@ -707,28 +533,16 @@ async function main() {
         if (!rest[0]) throw new Error("viewId required");
         res = await action({ action: "select", viewId: rest[0] });
         break;
-      case "cdp": {
-        if (!rest[0]) throw new Error("CDP method required");
-        const method = rest[0];
-        let params = {};
-        if (rest[1]) params = JSON.parse(rest.slice(1).join(" "));
-        res = await action({ action: "cdp", method, params });
-        break;
-      }
       default:
         usage();
         process.exit(1);
     }
 
-    // Annotate with routing for clarity
     if (res.data && typeof res.data === "object") {
-      res.data._bridge = {
+      res.data._cli = {
         port,
         how: target.how,
-        workspace:
-          target.instance?.primaryName ||
-          res.data.workspace?.primaryName ||
-          null,
+        workspace: target.instance?.primaryName || res.data.workspace?.primaryName,
       };
     }
     print(res.data !== undefined ? res.data : res);

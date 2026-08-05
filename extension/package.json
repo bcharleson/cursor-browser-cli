@@ -1,38 +1,39 @@
 {
-  "name": "cursor-browser-bridge",
-  "displayName": "Cursor Browser Bridge",
-  "description": "Expose Cursor Browser Tab to Grok / Claude Code / Codex via localhost HTTP + MCP",
-  "version": "0.3.0",
+  "name": "cursor-browser-cli",
+  "displayName": "Cursor Browser CLI",
+  "description": "Drive Cursor Browser Tab from CLI / MCP (Grok, Claude Code, Codex)",
+  "version": "1.0.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
   },
   "categories": ["Other"],
+  "extensionKind": ["workspace"],
   "activationEvents": ["onStartupFinished"],
   "main": "./extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "cursorBrowserBridge.status",
-        "title": "Cursor Browser Bridge: Show Status"
+        "command": "cursorBrowserCli.status",
+        "title": "Cursor Browser CLI: Show Status"
       },
       {
-        "command": "cursorBrowserBridge.restart",
-        "title": "Cursor Browser Bridge: Restart Server"
+        "command": "cursorBrowserCli.restart",
+        "title": "Cursor Browser CLI: Restart Server"
       }
     ],
     "configuration": {
-      "title": "Cursor Browser Bridge",
+      "title": "Cursor Browser CLI",
       "properties": {
-        "cursorBrowserBridge.port": {
+        "cursorBrowserCli.port": {
           "type": "number",
           "default": 17373,
           "description": "Preferred localhost HTTP port (falls through if busy)"
         },
-        "cursorBrowserBridge.enabled": {
+        "cursorBrowserCli.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Start the bridge HTTP server on activation"
+          "description": "Start the HTTP bridge on activation"
         }
       }
     }

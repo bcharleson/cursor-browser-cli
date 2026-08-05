@@ -1,36 +1,32 @@
 {
-  "name": "cursor-browser-bridge",
-  "version": "0.3.0",
-  "description": "Drive Cursor IDE's built-in Browser Tab from Grok Build, Claude Code, Codex, or any MCP/CLI agent",
+  "name": "cursor-browser-cli",
+  "version": "1.0.0",
+  "description": "CLI + MCP to drive Cursor IDE's built-in Browser Tab from Grok Build, Claude Code, Codex, or shell",
   "private": false,
   "license": "MIT",
   "author": "Brandon Charleson",
   "repository": {
     "type": "git",
-    "url": "https://github.com/brandoncharleson/cursor-browser-bridge.git"
+    "url": "https://github.com/brandoncharleson/cursor-browser-cli.git"
   },
-  "bugs": {
-    "url": "https://github.com/brandoncharleson/cursor-browser-bridge/issues"
-  },
-  "homepage": "https://github.com/brandoncharleson/cursor-browser-bridge#readme",
+  "homepage": "https://github.com/brandoncharleson/cursor-browser-cli#readme",
   "keywords": [
     "cursor",
     "cursor-ide",
     "browser",
-    "browser-automation",
+    "cli",
     "mcp",
-    "model-context-protocol",
     "claude-code",
     "codex",
     "grok",
-    "devtools",
-    "vscode-extension"
+    "browser-automation",
+    "devtools"
   ],
   "bin": {
     "cursor-browser": "./cli/cursor-browser"
   },
   "scripts": {
-    "install-bridge": "./scripts/install.sh",
+    "install-cli": "./scripts/install.sh",
     "mcp": "node ./mcp/server.mjs"
   },
   "engines": {
