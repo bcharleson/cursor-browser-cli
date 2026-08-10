@@ -208,6 +208,14 @@ npm install          # runs setup
 This is the loop CLI agents should follow:
 
 ```bash
+# 0) Discover this project → bridge port (required with multiple Cursor windows)
+cursor-browser windows          # list: project → port
+cursor-browser pin              # this cwd's project + port + export lines
+eval $(cursor-browser pin --export)
+# sets CURSOR_BROWSER_WORKSPACE + CURSOR_BROWSER_CLI_PORT
+# prefer workspace name over port (ports can change after recover)
+
+# or pin explicitly:
 export WS=my-app   # folder name of the Cursor workspace
 
 # 1) One clean tab + navigate → snapshot with [ref=e…] printed
@@ -231,12 +239,13 @@ cursor-browser --workspace $WS console
 
 **Rules of thumb**
 
-1. Take a **fresh `snapshot`** after navigation or large DOM changes before using refs.  
-2. Prefer **ref** (`e12`) over CSS when the snapshot provides one.  
-3. Prefer **`open` / `nav`** (they return snapshots) over bare navigate without a follow-up snap.  
-4. Use **`wait`** after clicks that change URL or content.  
-5. Use **`close`** if extra tabs pile up; keep one tab for reliability.  
-6. With multiple Cursor windows, always pass **`--workspace`**.
+1. **Pin first** — `windows` → `pin` → env or `--workspace` (never guess with multi-window).  
+2. Take a **fresh `snapshot`** after navigation or large DOM changes before using refs.  
+3. Prefer **ref** (`e12`) over CSS when the snapshot provides one.  
+4. Prefer **`open` / `nav`** (they return snapshots) over bare navigate without a follow-up snap.  
+5. Use **`wait`** after clicks that change URL or content.  
+6. Use **`close`** if extra tabs pile up; keep one tab for reliability.  
+7. With multiple Cursor windows, always pass **`--workspace`** (or pin via `eval $(cursor-browser pin --export)`).
 
 ---
 
@@ -251,8 +260,9 @@ cursor-browser [--workspace NAME|PATH] [--port N] <command> [args]
 | Flag | Alias | Description |
 |------|-------|-------------|
 | `--workspace <name\|path>` | `-w`, `--project` | Target Cursor window by workspace folder name or absolute path |
-| `--port <n>` | `-p` | Force a specific bridge port (skips discovery) |
+| `--port <n>` | `-p` | Force a specific bridge port (from `pin` / `windows`) |
 | `--json` | | Print full JSON (large trees stripped) instead of snapshot text |
+| `--export` | | With `pin` / `resolve`: print shell exports only (`eval $(cursor-browser pin --export)`) |
 | `--snap` | `--snapshot` | After interact, attach a fresh ref snapshot |
 | `--wait-nav` | `--wait-navigation` | After click, wait for URL change |
 | `--help` | `-h` | Show usage |
@@ -270,8 +280,9 @@ Legacy env names from earlier package renames may still be read by clients for c
 
 | Command | Description |
 |---------|-------------|
-| `windows` | List Cursor windows with a running server |
-| `whoami` / `status` / `health` | Resolved target + health |
+| `windows` | List live bridges (project → port) |
+| `pin` / `resolve` | Discover this project + port; agent pin step (`--export` for shell) |
+| `whoami` / `status` / `health` | Resolved target + health + pin exports |
 | `probe` | Low-level reachability check |
 
 ### Tabs and navigation
@@ -338,15 +349,34 @@ cursor-browser --workspace my-app wait --selector "button.save"
 When you have several Cursor projects open, the CLI picks a target in this order:
 
 1. `--port` / `CURSOR_BROWSER_CLI_PORT`  
-2. `--workspace` / `CURSOR_BROWSER_WORKSPACE`  
-3. Match current `cwd` to a registered workspace folder  
-4. Process discovery fallback (`lsof` on loopback ports in the 173xx range)  
-5. Single open instance  
+2. `--workspace` / `CURSOR_BROWSER_WORKSPACE` / `CURSOR_BROWSER_PROJECT`  
+3. Match current `cwd` to a registered workspace folder (strong match only)  
+4. Single open instance  
+5. **Fail closed** — never silently open another project when multiple bridges are live  
+
+Shared `~/.cursor-browser-cli/port` is only used when **no** instances are registered (recovery), not as a multi-window fallback.
 
 ```bash
 cursor-browser windows
-cursor-browser --workspace af-exec-travel whoami
+cursor-browser pin
+eval $(cursor-browser pin --export)
+cursor-browser whoami
+cursor-browser open http://localhost:3000
+# or without env:
 cursor-browser --workspace af-exec-travel open http://localhost:3000
+```
+
+`pin` / `resolve` output (human):
+
+```text
+project:  my-app
+path:     /Users/you/Developer/my-app
+port:     17375
+how:      cwd (score 100)
+live:     yes
+
+# Pin this project for the rest of the shell/session:
+export CURSOR_BROWSER_WORKSPACE='my-app' CURSOR_BROWSER_CLI_PORT=17375
 ```
 
 ---
@@ -397,15 +427,22 @@ Optional env on the server process:
 - `CURSOR_BROWSER_WORKSPACE`  
 - `CURSOR_BROWSER_CLI_PORT`  
 
-Or pass `workspace` on each tool call.
+Or pass `workspace` on each tool call. **With multiple Cursor projects open, `workspace` is required** (MCP fails closed instead of opening the wrong project).
+
+### Agent pin flow (MCP)
+
+1. `browser_windows` — list project → port  
+2. `browser_resolve` (or `browser_pin`) — returns `workspace`, `port`, and pin instructions  
+3. Pass that `workspace` on every subsequent `browser_*` call  
 
 ### Tools
 
-All tools accept optional **`workspace`** (project folder name or path) unless noted.
+All tools accept optional **`workspace`** (project folder name or path) unless noted. With multiple live bridges, pass it every time.
 
 | Tool | Purpose |
 |------|---------|
-| `browser_windows` | List windows with active servers |
+| `browser_windows` | List live bridges (project → port) |
+| `browser_resolve` / `browser_pin` | Discover project + port for this agent; pin before open |
 | `browser_status` | Health + workspace for a window |
 | `browser_open` | Open/reuse single tab, navigate, return ref snapshot |
 | `browser_navigate` | Navigate active tab + snapshot |
@@ -498,19 +535,24 @@ Ports start at **17373** and try up to **32** candidates if the preferred port i
 
 ### Typical product/UI session
 
-1. `browser_windows` or `cursor-browser windows`  
-2. `open` / `browser_open` on `http://localhost:…` or staging URL  
-3. Read refs from the snapshot  
-4. `click` / `fill` / `press`  
-5. `wait` for URL or text  
-6. New `snapshot` after major UI change  
-7. `screenshot` or `inspect` when stuck  
+1. `browser_windows` or `cursor-browser windows` — list project → port  
+2. `browser_resolve` / `cursor-browser pin` — pin this project (env or `workspace` arg)  
+3. `open` / `browser_open` on `http://localhost:…` or staging URL  
+4. Read refs from the snapshot  
+5. `click` / `fill` / `press`  
+6. `wait` for URL or text  
+7. New `snapshot` after major UI change  
+8. `screenshot` or `inspect` when stuck  
 
 ### Multi-project day
 
-Always pin the project:
+Always discover then pin:
 
 ```bash
+cursor-browser windows
+cursor-browser pin
+eval $(cursor-browser pin --export)
+
 cursor-browser --workspace project-a open http://localhost:3000
 cursor-browser --workspace project-b open http://localhost:4000
 ```
@@ -544,7 +586,8 @@ That continuity is the whole point of this tool.
 |---------|-----|
 | Connection refused / empty `windows` | **`cursor-browser doctor`** then **`cursor-browser recover`**. Clears stale ports, asks extension to restart (file trigger), optionally reloads Cursor. Browser Tab open ≠ bridge up. |
 | After reboot bridge dead | Extension host did not re-bind HTTP. `recover` → wait → `windows`. Ensure **Cursor Browser CLI** extension is Enabled. |
-| Wrong project / wrong app | `cursor-browser windows` then `--workspace <name>` |
+| Wrong project / wrong app | `cursor-browser windows` → `pin` → `--workspace <name>` or `eval $(cursor-browser pin --export)` |
+| Multiple windows; cannot guess | Pass `--workspace` / MCP `workspace`; CLI and MCP fail closed |
 | Stale ref / element not found | New `snapshot` / `open` / `nav`; never reuse refs across big DOM changes |
 | Race / empty or intermediate page | `wait --url` / `--text` / `--ref` / `--selector` with a higher `--timeout` |
 | Extra tabs / flaky targeting | `close`, then `open` or `nav` to enforce single-tab |

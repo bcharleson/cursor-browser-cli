@@ -247,7 +247,7 @@ function main() {
   );
   console.log("  2. cursor-browser windows");
   console.log(
-    "  3. cursor-browser --workspace <project> open https://example.com"
+    "  3. cursor-browser pin   # discover this project → port"
   );
   console.log("  4. cursor-browser --workspace <project> snapshot");
   console.log("");

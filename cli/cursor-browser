@@ -155,15 +155,34 @@ function scoreInstance(inst, query) {
   return score;
 }
 
+function formatWindowsHint(instances) {
+  return (
+    instances
+      .map((i) => `  :${i.port}  ${i.primaryName || "?"}  ${i.primaryPath || ""}`)
+      .join("\n") +
+    `\nDiscover: cursor-browser windows\nPin:      cursor-browser pin\nUse:      cursor-browser --workspace <name> <cmd>`
+  );
+}
+
+/**
+ * Resolve which Cursor window/bridge to talk to.
+ * Order: explicit port → --workspace / env → cwd match → single instance.
+ * Never silently picks another project when multiple bridges are live.
+ */
 function resolveTarget(opts = {}) {
   if (opts.port || process.env.CURSOR_BROWSER_BRIDGE_PORT || process.env.CURSOR_BROWSER_CLI_PORT) {
+    const port = Number(
+      opts.port ||
+        process.env.CURSOR_BROWSER_CLI_PORT ||
+        process.env.CURSOR_BROWSER_BRIDGE_PORT
+    );
+    const instances = listInstances();
+    const instance = instances.find((i) => Number(i.port) === port) || null;
     return {
-      port: Number(
-        opts.port ||
-          process.env.CURSOR_BROWSER_CLI_PORT ||
-          process.env.CURSOR_BROWSER_BRIDGE_PORT
-      ),
+      port,
       how: "explicit-port",
+      instance,
+      workspace: instance?.primaryName || null,
     };
   }
   const instances = listInstances();
@@ -174,17 +193,18 @@ function resolveTarget(opts = {}) {
     null;
 
   if (!instances.length) {
+    // Only use shared port-file when no registry — never as multi-project fallback.
     for (const f of [PORT_FILE, LEGACY_PORT]) {
       try {
         if (fs.existsSync(f)) {
           const n = Number(fs.readFileSync(f, "utf8").trim());
-          if (n > 0 && portIsAlive(n)) return { port: n, how: "port-file" };
+          if (n > 0 && portIsAlive(n)) return { port: n, how: "port-file", instance: null };
         }
       } catch {
         /* ignore */
       }
     }
-    return { port: DEFAULT_PORT, how: "default-no-bridge" };
+    return { port: DEFAULT_PORT, how: "default-no-bridge", instance: null };
   }
 
   if (query) {
@@ -198,11 +218,16 @@ function resolveTarget(opts = {}) {
       }
     }
     if (best && bestScore >= 50) {
-      return { port: best.port, how: "workspace-query", instance: best, score: bestScore };
+      return {
+        port: best.port,
+        how: "workspace-query",
+        instance: best,
+        score: bestScore,
+        workspace: best.primaryName || null,
+      };
     }
     throw new Error(
-      `No bridge matched workspace "${query}".\n` +
-        instances.map((i) => `  :${i.port}  ${i.primaryName || "?"}  ${i.primaryPath || ""}`).join("\n")
+      `No bridge matched workspace "${query}".\n` + formatWindowsHint(instances)
     );
   }
 
@@ -217,15 +242,98 @@ function resolveTarget(opts = {}) {
     }
   }
   if (best && bestScore >= 70) {
-    return { port: best.port, how: "cwd", instance: best, score: bestScore };
+    return {
+      port: best.port,
+      how: "cwd",
+      instance: best,
+      score: bestScore,
+      workspace: best.primaryName || null,
+    };
   }
   if (instances.length === 1) {
-    return { port: instances[0].port, how: "single-instance", instance: instances[0] };
+    return {
+      port: instances[0].port,
+      how: "single-instance",
+      instance: instances[0],
+      workspace: instances[0].primaryName || null,
+    };
   }
   throw new Error(
-    `Multiple Cursor windows; pick one:\n` +
-      instances.map((i) => `  :${i.port}  ${i.primaryName || "?"}`).join("\n") +
-      `\nUse: cursor-browser --workspace <name> <cmd>`
+    `Multiple Cursor windows; cannot guess project from cwd (${cwd}).\n` +
+      formatWindowsHint(instances)
+  );
+}
+
+function shellSingleQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Build a pin payload: current project + bridge port for agents to reuse.
+ */
+function buildPinPayload(target, whoamiData = {}) {
+  const ws = whoamiData.workspace || {};
+  const workspace =
+    ws.primaryName ||
+    target.instance?.primaryName ||
+    target.workspace ||
+    path.basename(process.cwd());
+  const workspacePath =
+    ws.primaryPath || target.instance?.primaryPath || process.cwd();
+  const port = Number(whoamiData.port || target.port);
+  const exportsEnv = {
+    CURSOR_BROWSER_WORKSPACE: workspace,
+    CURSOR_BROWSER_CLI_PORT: String(port),
+  };
+  return {
+    ok: true,
+    workspace,
+    workspacePath,
+    port,
+    how: target.how,
+    score: target.score ?? null,
+    cwd: process.cwd(),
+    live: whoamiData.ok !== false && !!whoamiData.version,
+    version: whoamiData.version || null,
+    instanceId: whoamiData.instanceId || target.instance?.id || null,
+    exports: exportsEnv,
+    use: {
+      env: `export CURSOR_BROWSER_WORKSPACE=${shellSingleQuote(workspace)} CURSOR_BROWSER_CLI_PORT=${port}`,
+      flag: `--workspace ${workspace}`,
+      portFlag: `--port ${port}`,
+      example: `cursor-browser --workspace ${shellSingleQuote(workspace)} open http://localhost:3000`,
+    },
+    agent: {
+      step1: "cursor-browser pin   # or: windows + whoami",
+      step2: `export CURSOR_BROWSER_WORKSPACE=${shellSingleQuote(workspace)}`,
+      step3: "cursor-browser open <url>   # all later cmds use this project",
+      note: "Prefer workspace name over port; ports can change after recover/restart.",
+    },
+  };
+}
+
+function formatPinHuman(pin) {
+  const lines = [
+    `project:  ${pin.workspace}`,
+    `path:     ${pin.workspacePath}`,
+    `port:     ${pin.port}`,
+    `how:      ${pin.how}${pin.score != null ? ` (score ${pin.score})` : ""}`,
+    `live:     ${pin.live ? "yes" : "no"}`,
+    "",
+    "# Pin this project for the rest of the shell/session:",
+    pin.use.env,
+    "",
+    "# Or pass every time:",
+    `# cursor-browser ${pin.use.flag} open <url>`,
+    `# cursor-browser ${pin.use.portFlag} open <url>`,
+  ];
+  return lines.join("\n") + "\n";
+}
+
+function formatExportShell(pin) {
+  return (
+    `export CURSOR_BROWSER_WORKSPACE=${shellSingleQuote(pin.workspace)}\n` +
+    `export CURSOR_BROWSER_CLI_PORT=${pin.port}\n`
   );
 }
 
@@ -334,6 +442,15 @@ function print(data, { asJson = false } = {}) {
     return;
   }
   if (!asJson) {
+    // pin / resolve / --export
+    if (data && data._format === "export-shell" && data.exports) {
+      process.stdout.write(formatExportShell(data));
+      return;
+    }
+    if (data && data._format === "pin" && data.workspace && data.port) {
+      process.stdout.write(formatPinHuman(data));
+      return;
+    }
     const snapText = extractSnapshotText(data);
     if (snapText != null) {
       // When open/nav/snap actions also include non-snapshot fields, print snap first
@@ -343,6 +460,13 @@ function print(data, { asJson = false } = {}) {
       if (nav && typeof nav === "object") {
         process.stdout.write(
           `# navigation: ${nav.ok === false ? "timeout" : "ok"} ${nav.from || ""} → ${nav.url || ""}\n`
+        );
+      }
+      // Always show which project/port served this response (multi-window safety)
+      const cli = data?._cli;
+      if (cli?.port) {
+        process.stdout.write(
+          `# bridge: ${cli.workspace || "?"} :${cli.port} (${cli.how || "?"})\n`
         );
       }
       return;
@@ -685,9 +809,10 @@ Setup:
   doctor               Diagnose bridge (ports, extension, stale state)
   recover | restart    Clear stale state + try restart bridge + wait
 
-Routing:
-  windows              List Cursor windows with a bridge
-  whoami | status      Target window + health
+Routing (do this first with multiple Cursor projects open):
+  windows              List live bridges: project → port
+  pin | resolve        Discover THIS project + port (agent pin step)
+  whoami | status      Target window + health + pin exports
 
 Tabs / nav:
   open <url>           Single-tab open + navigate + snapshot (text)
@@ -710,7 +835,9 @@ Interact (prefer ref from snapshot):
 
 Flags:
   --workspace NAME     Target Cursor window (multi-project)
+  --port N             Target by bridge port (from pin/windows)
   --json               Full JSON (trees stripped)
+  --export             pin/resolve: print shell exports only (eval-friendly)
   --snap               Attach fresh snapshot after interact
   --wait-nav           After click, wait for URL change
   --timeout ms         Wait timeout (default 30000)
@@ -720,8 +847,15 @@ Under the hood:
   wait [--url substr] [--text str] [--ref e1] [--selector css]
   resize <W> <H> | screenshot [path.png]
 
+Agent multi-project flow:
+  cursor-browser windows                 # list project → port
+  cursor-browser pin                     # this cwd's project + port
+  eval $(cursor-browser pin --export)    # pin env for session
+  cursor-browser open http://localhost:3000
+
 Examples:
   cursor-browser setup
+  cursor-browser pin
   cursor-browser --workspace my-app open http://localhost:3000
   cursor-browser --workspace my-app click e5 --snap
   cursor-browser --workspace my-app fill e3 "hello"
@@ -738,6 +872,7 @@ function parseArgs(argv) {
     else if (a.startsWith("--workspace=")) opts.workspace = a.slice(12);
     else if (a === "--interactive") opts.flags.interactive = true;
     else if (a === "--json") opts.flags.json = true;
+    else if (a === "--export") opts.flags.export = true;
     else if (a === "--snap" || a === "--snapshot") opts.flags.snap = true;
     else if (a === "--wait-nav" || a === "--wait-navigation") opts.flags.waitNav = true;
     else if (a === "--url") opts.flags.urlContains = argv[++i];
@@ -862,13 +997,42 @@ async function main() {
       case "health":
         res = await get("/status");
         break;
-      case "whoami":
+      case "pin":
+      case "resolve": {
+        // Discover current project → port so agents can pin the correct bridge.
+        const who = await get("/whoami");
+        const pin = buildPinPayload(target, who.data || {});
+        if (opts.flags.export) {
+          pin._format = "export-shell";
+        } else if (!asJson) {
+          pin._format = "pin";
+        }
+        res = { data: pin, port, status: who.status };
+        break;
+      }
+      case "whoami": {
         res = await get("/whoami");
+        const pin = buildPinPayload(target, res.data || {});
         res.data = {
           ...res.data,
-          routing: { how: target.how, score: target.score, cwd: process.cwd() },
+          routing: {
+            how: target.how,
+            score: target.score,
+            cwd: process.cwd(),
+            workspace: pin.workspace,
+            port: pin.port,
+          },
+          pin: {
+            workspace: pin.workspace,
+            workspacePath: pin.workspacePath,
+            port: pin.port,
+            exports: pin.exports,
+            use: pin.use,
+            agent: pin.agent,
+          },
         };
         break;
+      }
       case "probe":
         res = await get("/probe");
         break;
@@ -1100,10 +1264,17 @@ async function main() {
     }
 
     if (res.data && typeof res.data === "object") {
+      const wsName =
+        res.data.workspace?.primaryName ||
+        res.data.pin?.workspace ||
+        res.data.workspace ||
+        target.instance?.primaryName ||
+        target.workspace ||
+        null;
       res.data._cli = {
         port,
         how: target.how,
-        workspace: target.instance?.primaryName || res.data.workspace?.primaryName,
+        workspace: typeof wsName === "string" ? wsName : wsName?.primaryName || null,
       };
     }
     print(res.data !== undefined ? res.data : res, { asJson });

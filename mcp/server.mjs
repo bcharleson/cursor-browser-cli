@@ -12,6 +12,7 @@ const STATE_DIR = path.join(os.homedir(), ".cursor-browser-cli");
 const INSTANCES_FILE = path.join(STATE_DIR, "instances.json");
 const PORT_FILE = path.join(STATE_DIR, "port");
 const LEGACY_INSTANCES = path.join(os.homedir(), ".cursor-browser-bridge", "instances.json");
+const LEGACY_PORT = path.join(os.homedir(), ".cursor-browser-bridge", "port");
 const DEFAULT_PORT = 17373;
 
 function readInstances() {
@@ -25,6 +26,29 @@ function readInstances() {
   return {};
 }
 
+function portIsAlive(port) {
+  try {
+    execSync(
+      `node -e "const n=require('net');const s=n.connect(${Number(port)},'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),400);"`,
+      { stdio: "ignore" }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function listInstances() {
+  const map = readInstances();
+  const out = [];
+  for (const inst of Object.values(map)) {
+    if (inst.port && portIsAlive(Number(inst.port))) out.push(inst);
+  }
+  return out.sort((a, b) =>
+    String(a.primaryName || "").localeCompare(String(b.primaryName || ""))
+  );
+}
+
 function scoreInstance(inst, query) {
   if (!query) return 0;
   const q = path.resolve(query);
@@ -33,10 +57,14 @@ function scoreInstance(inst, query) {
   let score = 0;
   const paths = inst.workspacePaths || (inst.primaryPath ? [inst.primaryPath] : []);
   const names = inst.workspaceNames || (inst.primaryName ? [inst.primaryName] : []);
+  const bases = inst.basenames || paths.map((p) => path.basename(p));
   for (const p of paths) {
     const rp = path.resolve(p);
     if (q === rp) score = Math.max(score, 100);
     else if (q.startsWith(rp + path.sep)) score = Math.max(score, 90);
+  }
+  for (const b of bases) {
+    if (b.toLowerCase() === qBase || b.toLowerCase() === qLower) score = Math.max(score, 80);
   }
   for (const n of names) {
     if (n.toLowerCase() === qLower || n.toLowerCase() === qBase) score = Math.max(score, 85);
@@ -44,16 +72,63 @@ function scoreInstance(inst, query) {
   return score;
 }
 
-function resolvePort(workspaceHint) {
+function formatWindowsHint(instances) {
+  return (
+    instances
+      .map((i) => `  :${i.port}  ${i.primaryName || "?"}  ${i.primaryPath || ""}`)
+      .join("\n") +
+    `\nCall browser_windows, then browser_resolve with workspace="<name>", and pass workspace on every tool call.`
+  );
+}
+
+/**
+ * Resolve which bridge to use. Fail closed with multiple windows (no silent wrong project).
+ * Returns { port, how, instance, score?, workspace? }.
+ */
+function resolveTarget(workspaceHint) {
   if (process.env.CURSOR_BROWSER_CLI_PORT || process.env.CURSOR_BROWSER_BRIDGE_PORT) {
-    return Number(process.env.CURSOR_BROWSER_CLI_PORT || process.env.CURSOR_BROWSER_BRIDGE_PORT);
+    const port = Number(
+      process.env.CURSOR_BROWSER_CLI_PORT || process.env.CURSOR_BROWSER_BRIDGE_PORT
+    );
+    const instances = listInstances();
+    const instance = instances.find((i) => Number(i.port) === port) || null;
+    return {
+      port,
+      how: "explicit-port",
+      instance,
+      workspace: instance?.primaryName || null,
+    };
   }
-  const instances = Object.values(readInstances());
+
+  const instances = listInstances();
   const query =
     workspaceHint ||
     process.env.CURSOR_BROWSER_WORKSPACE ||
-    process.cwd();
-  if (instances.length) {
+    process.env.CURSOR_BROWSER_PROJECT ||
+    null;
+
+  if (!instances.length) {
+    for (const f of [PORT_FILE, LEGACY_PORT]) {
+      try {
+        if (fs.existsSync(f)) {
+          const n = Number(fs.readFileSync(f, "utf8").trim());
+          if (n > 0 && portIsAlive(n)) {
+            return { port: n, how: "port-file", instance: null, workspace: null };
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return {
+      port: DEFAULT_PORT,
+      how: "default-no-bridge",
+      instance: null,
+      workspace: null,
+    };
+  }
+
+  if (query) {
     let best = null;
     let bestScore = 0;
     for (const inst of instances) {
@@ -63,22 +138,103 @@ function resolvePort(workspaceHint) {
         best = inst;
       }
     }
-    if (best && bestScore >= 50) return best.port;
-    if (instances.length === 1) return instances[0].port;
-  }
-  try {
-    if (fs.existsSync(PORT_FILE)) {
-      const n = Number(fs.readFileSync(PORT_FILE, "utf8").trim());
-      if (n > 0) return n;
+    if (best && bestScore >= 50) {
+      return {
+        port: best.port,
+        how: "workspace-query",
+        instance: best,
+        score: bestScore,
+        workspace: best.primaryName || null,
+      };
     }
-  } catch {
-    /* ignore */
+    throw new Error(
+      `No bridge matched workspace "${query}".\n` + formatWindowsHint(instances)
+    );
   }
-  return DEFAULT_PORT;
+
+  // No workspace hint: try cwd (only strong matches), else single instance, else fail closed.
+  const cwd = process.cwd();
+  let best = null;
+  let bestScore = 0;
+  for (const inst of instances) {
+    const s = scoreInstance(inst, cwd);
+    if (s > bestScore) {
+      bestScore = s;
+      best = inst;
+    }
+  }
+  if (best && bestScore >= 70) {
+    return {
+      port: best.port,
+      how: "cwd",
+      instance: best,
+      score: bestScore,
+      workspace: best.primaryName || null,
+    };
+  }
+  if (instances.length === 1) {
+    return {
+      port: instances[0].port,
+      how: "single-instance",
+      instance: instances[0],
+      workspace: instances[0].primaryName || null,
+    };
+  }
+  throw new Error(
+    `Multiple Cursor windows; pass workspace on each tool call.\n` +
+      formatWindowsHint(instances)
+  );
 }
 
-function httpJson(method, pathname, body, workspaceHint) {
-  const port = resolvePort(workspaceHint);
+function buildPinPayload(target, whoamiData = {}) {
+  const ws = whoamiData.workspace || {};
+  const workspace =
+    ws.primaryName ||
+    target.instance?.primaryName ||
+    target.workspace ||
+    path.basename(process.cwd());
+  const workspacePath =
+    ws.primaryPath || target.instance?.primaryPath || process.cwd();
+  const port = Number(whoamiData.port || target.port);
+  return {
+    ok: true,
+    workspace,
+    workspacePath,
+    port,
+    how: target.how,
+    score: target.score ?? null,
+    cwd: process.cwd(),
+    live: whoamiData.ok !== false && !!whoamiData.version,
+    version: whoamiData.version || null,
+    instanceId: whoamiData.instanceId || target.instance?.id || null,
+    exports: {
+      CURSOR_BROWSER_WORKSPACE: workspace,
+      CURSOR_BROWSER_CLI_PORT: String(port),
+    },
+    agent: {
+      step1: "browser_windows → pick project",
+      step2: `browser_resolve with workspace="${workspace}" (or match cwd)`,
+      step3: `Pass workspace="${workspace}" on every subsequent browser_* call`,
+      note: "Prefer workspace name over port; ports can change after recover/restart.",
+    },
+  };
+}
+
+function httpJson(method, pathname, body, workspaceHint, explicitPort = null) {
+  let target;
+  let port;
+  if (explicitPort != null) {
+    port = Number(explicitPort);
+    target = {
+      port,
+      how: "explicit-port",
+      instance: null,
+      workspace: workspaceHint || null,
+    };
+  } else {
+    target = resolveTarget(workspaceHint);
+    port = target.port;
+  }
   const payload = body ? JSON.stringify(body) : null;
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -100,7 +256,18 @@ function httpJson(method, pathname, body, workspaceHint) {
           try {
             const data = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
             if (data && typeof data === "object") {
-              data._bridge = { port, workspaceHint: workspaceHint || process.cwd() };
+              data._bridge = {
+                port,
+                how: target.how,
+                workspace:
+                  target.workspace ||
+                  target.instance?.primaryName ||
+                  data.workspace?.primaryName ||
+                  workspaceHint ||
+                  null,
+                score: target.score ?? null,
+                workspaceHint: workspaceHint || process.env.CURSOR_BROWSER_WORKSPACE || null,
+              };
             }
             resolve(data);
           } catch {
@@ -125,24 +292,39 @@ const act = (body, ws) => httpJson("POST", "/action", body, ws);
 const WS = {
   workspace: {
     type: "string",
-    description: "Project folder name or path (e.g. af-exec-travel)",
+    description:
+      "REQUIRED with multiple Cursor projects open. Project folder name or absolute path (e.g. af-exec-travel). Get from browser_resolve / browser_windows.",
   },
 };
 
 const TOOLS = [
   {
     name: "browser_windows",
-    description: "List Cursor windows with cursor-browser-cli bridges",
+    description:
+      "List live Cursor windows with project name and bridge port. Call first on multi-project days, then browser_resolve, then pass workspace on every tool.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
+    name: "browser_resolve",
+    description:
+      "Discover which project/port this agent should use. Returns workspace name, path, port, and pin instructions. Call before open when multiple Cursor projects are open. Pass the same workspace on later tools.",
+    inputSchema: { type: "object", properties: { ...WS }, additionalProperties: false },
+  },
+  {
+    name: "browser_pin",
+    description:
+      "Alias of browser_resolve: pin current project → bridge port for subsequent browser_* calls.",
+    inputSchema: { type: "object", properties: { ...WS }, additionalProperties: false },
+  },
+  {
     name: "browser_status",
-    description: "Health + workspace for a Cursor window",
+    description: "Health + workspace for a Cursor window (include workspace when multi-project)",
     inputSchema: { type: "object", properties: { ...WS }, additionalProperties: false },
   },
   {
     name: "browser_open",
-    description: "Open/reuse single Browser Tab, navigate, return ref snapshot",
+    description:
+      "Open/reuse single Browser Tab, navigate, return ref snapshot. Pass workspace from browser_resolve when multiple projects are open.",
     inputSchema: {
       type: "object",
       properties: { url: { type: "string" }, ...WS },
@@ -497,8 +679,47 @@ async function callTool(name, args = {}) {
   const ws = args.workspace;
   switch (name) {
     case "browser_windows": {
-      const instances = Object.values(readInstances());
-      return { ok: true, instances, cwd: process.cwd() };
+      const instances = listInstances();
+      const enriched = [];
+      for (const inst of instances) {
+        try {
+          const r = await httpJson(
+            "GET",
+            "/whoami",
+            null,
+            inst.primaryName || inst.primaryPath,
+            inst.port
+          );
+          enriched.push({
+            port: inst.port,
+            primaryName: r.workspace?.primaryName || inst.primaryName,
+            primaryPath: r.workspace?.primaryPath || inst.primaryPath,
+            version: r.version,
+            live: true,
+          });
+        } catch {
+          enriched.push({
+            port: inst.port,
+            primaryName: inst.primaryName,
+            primaryPath: inst.primaryPath,
+            live: false,
+          });
+        }
+      }
+      return {
+        ok: true,
+        instances: enriched,
+        cwd: process.cwd(),
+        agent: {
+          next: 'Call browser_resolve with workspace="<primaryName>", then pass that workspace on every browser_* tool.',
+        },
+      };
+    }
+    case "browser_resolve":
+    case "browser_pin": {
+      const target = resolveTarget(ws);
+      const who = await httpJson("GET", "/whoami", null, ws);
+      return buildPinPayload(target, who);
     }
     case "browser_status":
       return httpJson("GET", "/status", null, ws);
@@ -685,7 +906,7 @@ process.stdin.on("data", async (chunk) => {
           result: {
             protocolVersion: "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "cursor-browser-cli", version: "1.1.0" },
+            serverInfo: { name: "cursor-browser-cli", version: "1.2.0" },
           },
         });
       } else if (method === "notifications/initialized" || method === "initialized") {
