@@ -16,7 +16,7 @@ const LEGACY_PORT_FILE = path.join(os.homedir(), ".cursor-browser-bridge", "port
 const LOG_FILE = path.join(STATE_DIR, "bridge.log");
 const BASE_PORT = 17373;
 const MAX_PORT_TRIES = 32;
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 let server = null;
 let statusBar = null;
@@ -378,12 +378,29 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function clickByRef(ref, viewId) {
+/** Race a promise so mid-navigation JS eval cannot hang the HTTP handler forever. */
+function withTimeout(promise, ms, label = "timeout") {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise((resolve) => {
+      timer = setTimeout(
+        () => resolve({ ok: false, error: label, timedOut: true }),
+        ms
+      );
+    }),
+  ]);
+}
+
+async function mouseOnRef(ref, viewId, kind) {
   const vid = viewId || (await resolveViewId());
   const script = `
     ${ELEMENT_FINDER_JS}
     (function() {
       var ref = ${JSON.stringify(ref)};
+      var kind = ${JSON.stringify(kind || "click")};
       var result = findElementByRef(ref);
       validateElement(result.element, ref, 'click');
       var el = result.element;
@@ -391,29 +408,316 @@ async function clickByRef(ref, viewId) {
       var rect = el.getBoundingClientRect();
       var x = rect.left + rect.width / 2;
       var y = rect.top + rect.height / 2;
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
-      el.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, clientX: x, clientY: y }));
-      el.dispatchEvent(new MouseEvent('click',     { bubbles: true, clientX: x, clientY: y }));
-      return { success: true, tag: el.tagName };
+      var base = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+      if (kind === 'rightclick' || kind === 'contextmenu') {
+        el.dispatchEvent(new MouseEvent('contextmenu', Object.assign({}, base, { button: 2 })));
+        return { success: true, tag: el.tagName, kind: 'rightclick' };
+      }
+      if (kind === 'dblclick' || kind === 'doubleclick') {
+        el.dispatchEvent(new MouseEvent('mousedown', base));
+        el.dispatchEvent(new MouseEvent('mouseup', base));
+        el.dispatchEvent(new MouseEvent('click', base));
+        el.dispatchEvent(new MouseEvent('mousedown', base));
+        el.dispatchEvent(new MouseEvent('mouseup', base));
+        el.dispatchEvent(new MouseEvent('click', base));
+        el.dispatchEvent(new MouseEvent('dblclick', base));
+        return { success: true, tag: el.tagName, kind: 'dblclick' };
+      }
+      el.dispatchEvent(new MouseEvent('mousedown', base));
+      el.dispatchEvent(new MouseEvent('mouseup', base));
+      el.dispatchEvent(new MouseEvent('click', base));
+      return { success: true, tag: el.tagName, kind: 'click' };
     })();
   `;
   return executeJavaScript(script, vid);
 }
 
-async function clickBySelector(selector, viewId) {
+async function clickByRef(ref, viewId) {
+  return mouseOnRef(ref, viewId, "click");
+}
+
+async function clickBySelector(selector, viewId, kind) {
   const vid = viewId || (await resolveViewId());
   const script = `
     (function() {
       var el = document.querySelector(${JSON.stringify(selector)});
+      var kind = ${JSON.stringify(kind || "click")};
       if (!el) return { ok: false, error: 'selector not found' };
       el.scrollIntoView({ block: 'center' });
       el.focus({ preventScroll: true });
+      var rect = el.getBoundingClientRect();
+      var x = rect.left + rect.width / 2;
+      var y = rect.top + rect.height / 2;
+      var base = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+      if (kind === 'rightclick' || kind === 'contextmenu') {
+        el.dispatchEvent(new MouseEvent('contextmenu', Object.assign({}, base, { button: 2 })));
+        return { ok: true, tag: el.tagName, kind: 'rightclick', box: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } };
+      }
+      if (kind === 'dblclick' || kind === 'doubleclick') {
+        el.dispatchEvent(new MouseEvent('dblclick', base));
+        return { ok: true, tag: el.tagName, kind: 'dblclick', box: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } };
+      }
       el.click();
-      var r = el.getBoundingClientRect();
-      return { ok: true, tag: el.tagName, box: { x: r.x, y: r.y, w: r.width, h: r.height } };
+      return { ok: true, tag: el.tagName, kind: 'click', box: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } };
     })();
   `;
   return executeJavaScript(script, vid);
+}
+
+async function scrollPage(body = {}) {
+  const vid = body.viewId || (await resolveViewId());
+  const ref = body.ref || null;
+  const selector = body.selector || null;
+  const script = `
+    ${ELEMENT_FINDER_JS}
+    (function() {
+      var ref = ${JSON.stringify(ref)};
+      var selector = ${JSON.stringify(selector)};
+      var x = ${Number(body.x) || 0};
+      var y = ${body.y != null ? Number(body.y) : body.deltaY != null ? Number(body.deltaY) : 0};
+      var top = ${body.top != null ? Number(body.top) : "null"};
+      var left = ${body.left != null ? Number(body.left) : "null"};
+      var el = null;
+      if (ref) {
+        var found = findElementByRef(ref);
+        el = found.element;
+        if (!el) return { ok: false, error: 'Element not found: ' + ref };
+      } else if (selector) {
+        el = document.querySelector(selector);
+        if (!el) return { ok: false, error: 'selector not found' };
+      }
+      if (el) {
+        if (top !== null || left !== null) {
+          el.scrollTo({
+            top: top !== null ? top : el.scrollTop,
+            left: left !== null ? left : el.scrollLeft,
+            behavior: 'instant'
+          });
+        } else if (x || y) {
+          el.scrollBy({ left: x, top: y, behavior: 'instant' });
+        } else {
+          el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'nearest' });
+        }
+        return {
+          ok: true,
+          scrolled: 'element',
+          scrollTop: el.scrollTop,
+          scrollLeft: el.scrollLeft,
+          tag: el.tagName
+        };
+      }
+      if (top !== null || left !== null) {
+        window.scrollTo({
+          top: top !== null ? top : window.scrollY,
+          left: left !== null ? left : window.scrollX,
+          behavior: 'instant'
+        });
+      } else {
+        window.scrollBy({ left: x, top: y || 400, behavior: 'instant' });
+      }
+      return {
+        ok: true,
+        scrolled: 'window',
+        scrollX: window.scrollX,
+        scrollY: window.scrollY
+      };
+    })();
+  `;
+  return executeJavaScript(script, vid);
+}
+
+async function selectOption(body = {}) {
+  const vid = body.viewId || (await resolveViewId());
+  const ref = body.ref || null;
+  const selector = body.selector || null;
+  const value = body.value != null ? String(body.value) : null;
+  const label = body.label != null ? String(body.label) : null;
+  const index = body.index != null ? Number(body.index) : null;
+  const script = `
+    ${ELEMENT_FINDER_JS}
+    (function() {
+      var ref = ${JSON.stringify(ref)};
+      var selector = ${JSON.stringify(selector)};
+      var value = ${JSON.stringify(value)};
+      var label = ${JSON.stringify(label)};
+      var index = ${index === null || Number.isNaN(index) ? "null" : index};
+      var el = null;
+      if (ref) {
+        var found = findElementByRef(ref);
+        el = found.element;
+        if (!el) throw new Error('Element not found: ' + ref);
+      } else if (selector) {
+        el = document.querySelector(selector);
+        if (!el) return { ok: false, error: 'selector not found' };
+      } else {
+        return { ok: false, error: 'select-option requires ref or selector' };
+      }
+      if (el.tagName !== 'SELECT') {
+        return { ok: false, error: 'element is not a <select> (got ' + el.tagName + ')' };
+      }
+      var options = Array.from(el.options || []);
+      var chosen = null;
+      if (value !== null) {
+        chosen = options.find(function(o) { return o.value === value; }) || null;
+      }
+      if (!chosen && label !== null) {
+        chosen = options.find(function(o) {
+          return (o.textContent || o.label || '').trim() === label;
+        }) || null;
+      }
+      if (!chosen && index !== null && index >= 0 && index < options.length) {
+        chosen = options[index];
+      }
+      if (!chosen) {
+        return {
+          ok: false,
+          error: 'option not found',
+          options: options.slice(0, 40).map(function(o, i) {
+            return { index: i, value: o.value, label: (o.textContent || '').trim() };
+          })
+        };
+      }
+      el.focus({ preventScroll: true });
+      el.value = chosen.value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return {
+        ok: true,
+        success: true,
+        value: el.value,
+        label: (chosen.textContent || '').trim(),
+        index: chosen.index
+      };
+    })();
+  `;
+  return executeJavaScript(script, vid);
+}
+
+async function waitDocumentReady(viewId, timeoutMs = 12000) {
+  const vid = viewId || (await resolveViewId());
+  const deadline = Date.now() + timeoutMs;
+  let lastUrl = null;
+  let stable = 0;
+  while (Date.now() < deadline) {
+    // Prefer getURL (no page JS) so mid-navigation cannot hang
+    const urlRes = await withTimeout(getURL(vid), 2500, "getURL timeout");
+    const url =
+      urlRes && urlRes.ok !== false
+        ? typeof urlRes.result === "string"
+          ? urlRes.result
+          : urlRes.result?.url || ""
+        : "";
+    if (url && url !== "about:blank") {
+      if (url === lastUrl) stable += 1;
+      else {
+        lastUrl = url;
+        stable = 0;
+      }
+      if (stable >= 2) {
+        const ready = await withTimeout(
+          executeJavaScript(
+            `(function(){ return document.readyState; })();`,
+            vid
+          ),
+          2500,
+          "readyState timeout"
+        );
+        if (
+          ready &&
+          ready.ok &&
+          (ready.result === "complete" || ready.result === "interactive")
+        ) {
+          return { ok: true, href: url, ready: ready.result, viewId: vid };
+        }
+        // URL stable long enough — proceed even if readyState eval is flaky
+        if (stable >= 3) {
+          return { ok: true, href: url, ready: "unknown", viewId: vid };
+        }
+      }
+    }
+    await sleep(250);
+  }
+  return { ok: false, error: "document not ready", href: lastUrl, viewId: vid };
+}
+
+async function maybeAttachSnapshot(result, body, viewId) {
+  if (!body || !(body.snapshot === true || body.includeSnapshot === true || body.snap === true)) {
+    return result;
+  }
+  if (!result || result.ok === false) return result;
+  await sleep(Number(body.snapshotDelayMs) || 250);
+  const vid = viewId || body.viewId || (await resolveViewId());
+  // Navigating clicks unload the document; wait for a stable URL first (short)
+  await waitDocumentReady(vid, Number(body.snapshotTimeoutMs) || 6000);
+  let snap;
+  try {
+    snap = await withTimeout(
+      pageSnapshot(vid, {
+        interactive: body.interactive !== false,
+      }),
+      Number(body.snapshotTimeoutMs) || 8000,
+      "snapshot timeout"
+    );
+  } catch (err) {
+    snap = { ok: false, error: String(err.message || err) };
+  }
+  if (snap && snap.ok && snap.result) {
+    if (result.result && typeof result.result === "object" && !Array.isArray(result.result)) {
+      return {
+        ...result,
+        result: {
+          ...result.result,
+          snapshot: snap.result,
+        },
+      };
+    }
+    return {
+      ok: true,
+      result: {
+        action: result.result ?? result,
+        snapshot: snap.result,
+      },
+    };
+  }
+  // Soft-fail: keep the interaction result even if post-snap failed
+  const errMsg = snap?.error || "snapshot failed after action";
+  if (result.result && typeof result.result === "object" && !Array.isArray(result.result)) {
+    return {
+      ...result,
+      result: {
+        ...result.result,
+        snapshotError: errMsg,
+      },
+    };
+  }
+  return {
+    ok: true,
+    result: {
+      action: result.result ?? result,
+      snapshotError: errMsg,
+    },
+  };
+}
+
+async function maybeWaitNavigation(beforeUrl, body, viewId) {
+  const want =
+    body &&
+    (body.waitNavigation === true ||
+      body.waitNav === true ||
+      body.waitForNavigation === true);
+  if (!want) return null;
+  const timeoutMs = Number(body.timeoutMs) || 10000;
+  const deadline = Date.now() + timeoutMs;
+  const vid = viewId || body.viewId || (await resolveViewId());
+  while (Date.now() < deadline) {
+    const urlRes = await getURL(vid);
+    const url = urlRes.result || "";
+    if (url && url !== beforeUrl && url !== "about:blank") {
+      return { ok: true, matched: "navigation", from: beforeUrl, url, viewId: vid };
+    }
+    await sleep(200);
+  }
+  return { ok: false, error: "waitNavigation timeout", from: beforeUrl };
 }
 
 async function typeByRef(ref, text, viewId, mode) {
@@ -465,9 +769,11 @@ async function typeByRef(ref, text, viewId, mode) {
   return executeJavaScript(script, vid);
 }
 
-async function typeBySelector(selector, text, viewId) {
+async function typeBySelector(selector, text, viewId, mode) {
   const vid = viewId || (await resolveViewId());
-  const script = `
+  const fill = mode !== "type";
+  const script = fill
+    ? `
     (function() {
       var el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return { ok: false, error: 'not found' };
@@ -483,7 +789,26 @@ async function typeBySelector(selector, text, viewId) {
       else return { ok: false, error: 'not typeable' };
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
-      return { ok: true, value: el.value !== undefined ? el.value : el.textContent };
+      return { ok: true, mode: 'fill', value: el.value !== undefined ? el.value : el.textContent };
+    })();
+  `
+    : `
+    (function() {
+      var el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return { ok: false, error: 'not found' };
+      el.focus({ preventScroll: true });
+      var text = ${JSON.stringify(text || "")};
+      for (var i = 0; i < text.length; i++) {
+        var ch = text[i];
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
+        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') el.value += ch;
+        else if (el.isContentEditable) document.execCommand('insertText', false, ch);
+        else return { ok: false, error: 'not typeable' };
+        el.dispatchEvent(new KeyboardEvent('keyup', { key: ch, bubbles: true }));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true, mode: 'type', value: el.value !== undefined ? el.value : el.textContent };
     })();
   `;
   return executeJavaScript(script, vid);
@@ -747,7 +1072,6 @@ async function handleAction(body) {
       await selectTab(ids[0]);
       return { ok: true, result: { closed, kept: ids[0] } };
     }
-    case "select":
     case "selectTab":
       if (!viewId) return { ok: false, error: "viewId required" };
       return selectTab(viewId);
@@ -769,29 +1093,120 @@ async function handleAction(body) {
         viewId: viewId || (await resolveViewId()),
         fullPage: !!body.fullPage,
       });
-    case "click": {
-      if (ref) return clickByRef(ref, viewId);
-      if (selector) return clickBySelector(selector, viewId);
-      return { ok: false, error: "click requires ref or selector" };
+    case "click":
+    case "dblclick":
+    case "doubleclick":
+    case "double-click":
+    case "rightclick":
+    case "right-click":
+    case "contextmenu": {
+      const kind =
+        action === "click"
+          ? "click"
+          : action === "dblclick" ||
+              action === "doubleclick" ||
+              action === "double-click"
+            ? "dblclick"
+            : "rightclick";
+      let beforeUrl = null;
+      if (
+        body.waitNavigation === true ||
+        body.waitNav === true ||
+        body.waitForNavigation === true
+      ) {
+        const urlRes = await getURL(viewId);
+        beforeUrl = urlRes.result || "";
+      }
+      let clickRes;
+      if (ref) {
+        clickRes = await withTimeout(
+          mouseOnRef(ref, viewId, kind),
+          8000,
+          `${kind} timeout`
+        );
+      } else if (selector) {
+        clickRes = await withTimeout(
+          clickBySelector(selector, viewId, kind),
+          8000,
+          `${kind} timeout`
+        );
+      } else {
+        return { ok: false, error: `${kind} requires ref or selector` };
+      }
+      if (clickRes && clickRes.ok === false && clickRes.timedOut) {
+        // Navigation often aborts in-page JS; treat as soft success and continue
+        clickRes = {
+          ok: true,
+          result: { success: true, kind, note: "click returned via timeout (likely navigated)" },
+        };
+      }
+      if (clickRes && clickRes.ok === false) return clickRes;
+      let navWait = null;
+      if (beforeUrl != null) {
+        navWait = await maybeWaitNavigation(beforeUrl, body, viewId);
+      }
+      const wrapped =
+        navWait != null
+          ? {
+              ok: clickRes?.ok !== false,
+              result: {
+                ...(clickRes?.result && typeof clickRes.result === "object"
+                  ? clickRes.result
+                  : clickRes),
+                navigation: navWait,
+              },
+            }
+          : clickRes;
+      return maybeAttachSnapshot(wrapped, body, viewId);
     }
     case "type": {
-      if (ref) return typeByRef(ref, text, viewId, "type");
-      if (selector) return typeBySelector(selector, text, viewId);
-      return { ok: false, error: "type requires ref or selector + text" };
+      let typeRes;
+      if (ref) typeRes = await typeByRef(ref, text, viewId, "type");
+      else if (selector) typeRes = await typeBySelector(selector, text, viewId, "type");
+      else return { ok: false, error: "type requires ref or selector + text" };
+      return maybeAttachSnapshot(typeRes, body, viewId);
     }
     case "fill": {
-      if (ref) return typeByRef(ref, text, viewId, "fill");
-      if (selector) return typeBySelector(selector, text, viewId);
-      return { ok: false, error: "fill requires ref or selector + value" };
+      let fillRes;
+      if (ref) fillRes = await typeByRef(ref, text, viewId, "fill");
+      else if (selector) fillRes = await typeBySelector(selector, text, viewId, "fill");
+      else return { ok: false, error: "fill requires ref or selector + value" };
+      return maybeAttachSnapshot(fillRes, body, viewId);
+    }
+    case "scroll": {
+      const scrollRes = await scrollPage({
+        ...body,
+        ref,
+        selector,
+        viewId,
+      });
+      return maybeAttachSnapshot(scrollRes, body, viewId);
+    }
+    case "select":
+    case "select-option":
+    case "selectOption":
+    case "select_option": {
+      // Tab select uses viewId only; option select needs ref/selector/value
+      if (viewId && !ref && !selector && body.value == null && body.label == null && body.index == null) {
+        return selectTab(viewId);
+      }
+      const optRes = await selectOption({
+        ...body,
+        ref,
+        selector,
+        viewId,
+      });
+      return maybeAttachSnapshot(optRes, body, viewId);
     }
     case "hover": {
       if (!ref) return { ok: false, error: "hover requires ref (run snapshot first)" };
-      return hoverByRef(ref, viewId);
+      const hoverRes = await hoverByRef(ref, viewId);
+      return maybeAttachSnapshot(hoverRes, body, viewId);
     }
     case "press":
     case "key":
       if (!body.key) return { ok: false, error: "key required" };
-      return pressKey(body.key, viewId);
+      return maybeAttachSnapshot(await pressKey(body.key, viewId), body, viewId);
     case "lock":
       return setLocked(true, viewId);
     case "unlock":
@@ -852,8 +1267,12 @@ async function handleAction(body) {
           "close",
           "snapshot",
           "click",
+          "dblclick",
+          "rightclick",
           "type",
           "fill",
+          "scroll",
+          "select-option",
           "hover",
           "press",
           "lock",

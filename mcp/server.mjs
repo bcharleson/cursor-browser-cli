@@ -175,13 +175,46 @@ const TOOLS = [
   },
   {
     name: "browser_click",
-    description: "Click by ref (from snapshot) or CSS selector",
+    description: "Click by ref (from snapshot) or CSS selector. Optional snapshot/waitNavigation.",
     inputSchema: {
       type: "object",
       properties: {
         ref: { type: "string" },
         selector: { type: "string" },
         viewId: { type: "string" },
+        snapshot: { type: "boolean", description: "Return fresh ref snapshot after click" },
+        waitNavigation: { type: "boolean", description: "Wait for URL change after click" },
+        timeoutMs: { type: "number" },
+        ...WS,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_dblclick",
+    description: "Double-click by ref or CSS selector",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string" },
+        selector: { type: "string" },
+        viewId: { type: "string" },
+        snapshot: { type: "boolean" },
+        ...WS,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_rightclick",
+    description: "Right-click / contextmenu by ref or CSS selector",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string" },
+        selector: { type: "string" },
+        viewId: { type: "string" },
+        snapshot: { type: "boolean" },
         ...WS,
       },
       additionalProperties: false,
@@ -189,7 +222,7 @@ const TOOLS = [
   },
   {
     name: "browser_type",
-    description: "Type into element by ref or selector (appends)",
+    description: "Type into element by ref or selector (appends characters)",
     inputSchema: {
       type: "object",
       properties: {
@@ -197,6 +230,7 @@ const TOOLS = [
         selector: { type: "string" },
         text: { type: "string" },
         viewId: { type: "string" },
+        snapshot: { type: "boolean" },
         ...WS,
       },
       required: ["text"],
@@ -214,6 +248,44 @@ const TOOLS = [
         value: { type: "string" },
         text: { type: "string" },
         viewId: { type: "string" },
+        snapshot: { type: "boolean" },
+        ...WS,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_scroll",
+    description: "Scroll window or element (ref/selector). Use y/x deltas or top/left absolute.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string" },
+        selector: { type: "string" },
+        x: { type: "number" },
+        y: { type: "number" },
+        top: { type: "number" },
+        left: { type: "number" },
+        viewId: { type: "string" },
+        snapshot: { type: "boolean" },
+        ...WS,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_select_option",
+    description: "Choose an option on a <select> by value, label, or index",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string" },
+        selector: { type: "string" },
+        value: { type: "string" },
+        label: { type: "string" },
+        index: { type: "number" },
+        viewId: { type: "string" },
+        snapshot: { type: "boolean" },
         ...WS,
       },
       additionalProperties: false,
@@ -224,7 +296,12 @@ const TOOLS = [
     description: "Hover element by snapshot ref",
     inputSchema: {
       type: "object",
-      properties: { ref: { type: "string" }, viewId: { type: "string" }, ...WS },
+      properties: {
+        ref: { type: "string" },
+        viewId: { type: "string" },
+        snapshot: { type: "boolean" },
+        ...WS,
+      },
       required: ["ref"],
       additionalProperties: false,
     },
@@ -234,7 +311,12 @@ const TOOLS = [
     description: "Press key (Enter submits forms)",
     inputSchema: {
       type: "object",
-      properties: { key: { type: "string" }, viewId: { type: "string" }, ...WS },
+      properties: {
+        key: { type: "string" },
+        viewId: { type: "string" },
+        snapshot: { type: "boolean" },
+        ...WS,
+      },
       required: ["key"],
       additionalProperties: false,
     },
@@ -348,11 +430,36 @@ const TOOLS = [
   },
 ];
 
+function extractSnapshotText(data) {
+  if (!data || typeof data !== "object") return null;
+  if (data.result?.text && data.result.yaml !== undefined) return data.result.text;
+  if (data.result?.snapshot?.text) return data.result.snapshot.text;
+  if (data.result?.action?.snapshot?.text) return data.result.action.snapshot.text;
+  return null;
+}
+
+function slimJson(data) {
+  try {
+    const clone = JSON.parse(JSON.stringify(data));
+    const dropTree = (snap) => {
+      if (snap && typeof snap === "object") delete snap.tree;
+    };
+    dropTree(clone.result);
+    dropTree(clone.result?.snapshot);
+    dropTree(clone.result?.action?.snapshot);
+    if (clone.result?.snapshot?.dataUrl) delete clone.result.snapshot.dataUrl;
+    return clone;
+  } catch {
+    return data;
+  }
+}
+
 function toMcpContent(data) {
-  // Prefer human snapshot text
-  if (data?.result?.text) {
+  // Prefer human snapshot text (open/nav/snapshot/interact+snap)
+  const snapText = extractSnapshotText(data);
+  if (snapText) {
     return {
-      content: [{ type: "text", text: data.result.text }],
+      content: [{ type: "text", text: snapText }],
     };
   }
   // Screenshot image for vision models
@@ -369,8 +476,21 @@ function toMcpContent(data) {
     }
   }
   return {
-    content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(slimJson(data), null, 2) }],
   };
+}
+
+function snapArgs(args = {}) {
+  const out = {};
+  if (args.snapshot === true || args.snap === true || args.includeSnapshot === true) {
+    out.snapshot = true;
+    out.includeSnapshot = true;
+  }
+  if (args.waitNavigation === true || args.waitNav === true) {
+    out.waitNavigation = true;
+    if (args.timeoutMs != null) out.timeoutMs = args.timeoutMs;
+  }
+  return out;
 }
 
 async function callTool(name, args = {}) {
@@ -403,6 +523,23 @@ async function callTool(name, args = {}) {
         ref: args.ref,
         selector: args.selector,
         viewId: args.viewId,
+        ...snapArgs(args),
+      }, ws);
+    case "browser_dblclick":
+      return act({
+        action: "dblclick",
+        ref: args.ref,
+        selector: args.selector,
+        viewId: args.viewId,
+        ...snapArgs(args),
+      }, ws);
+    case "browser_rightclick":
+      return act({
+        action: "rightclick",
+        ref: args.ref,
+        selector: args.selector,
+        viewId: args.viewId,
+        ...snapArgs(args),
       }, ws);
     case "browser_type":
       return act({
@@ -411,6 +548,7 @@ async function callTool(name, args = {}) {
         selector: args.selector,
         text: args.text,
         viewId: args.viewId,
+        ...snapArgs(args),
       }, ws);
     case "browser_fill":
       return act({
@@ -420,11 +558,45 @@ async function callTool(name, args = {}) {
         text: args.value || args.text,
         value: args.value || args.text,
         viewId: args.viewId,
+        ...snapArgs(args),
+      }, ws);
+    case "browser_scroll":
+      return act({
+        action: "scroll",
+        ref: args.ref,
+        selector: args.selector,
+        x: args.x,
+        y: args.y,
+        top: args.top,
+        left: args.left,
+        viewId: args.viewId,
+        ...snapArgs(args),
+      }, ws);
+    case "browser_select_option":
+      return act({
+        action: "select-option",
+        ref: args.ref,
+        selector: args.selector,
+        value: args.value,
+        label: args.label,
+        index: args.index,
+        viewId: args.viewId,
+        ...snapArgs(args),
       }, ws);
     case "browser_hover":
-      return act({ action: "hover", ref: args.ref, viewId: args.viewId }, ws);
+      return act({
+        action: "hover",
+        ref: args.ref,
+        viewId: args.viewId,
+        ...snapArgs(args),
+      }, ws);
     case "browser_press":
-      return act({ action: "press", key: args.key, viewId: args.viewId }, ws);
+      return act({
+        action: "press",
+        key: args.key,
+        viewId: args.viewId,
+        ...snapArgs(args),
+      }, ws);
     case "browser_wait":
       return act({
         action: "wait",
@@ -513,7 +685,7 @@ process.stdin.on("data", async (chunk) => {
           result: {
             protocolVersion: "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "cursor-browser-cli", version: "1.0.0" },
+            serverInfo: { name: "cursor-browser-cli", version: "1.1.0" },
           },
         });
       } else if (method === "notifications/initialized" || method === "initialized") {

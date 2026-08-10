@@ -59,11 +59,11 @@ You keep working in the CLI agent. The Browser Tab stays inside Cursor. No secon
 | Need | Use instead |
 |------|-------------|
 | Cursor’s own Agent chat/composer | Built-in browser tools (no extra install) |
-| Real Chrome user profile / extensions | Chrome CDP MCP, browser extensions, etc. |
+| External desktop browser / cookie sessions / full profile | A separate external-browser tool of your choice |
 | Headless CI / pure automation outside Cursor | Playwright, Puppeteer, or a headless browser MCP |
 | Native macOS UI outside the Browser Tab | Other OS automation tools |
 
-This project targets one job: **multi-agent access to Cursor’s Browser Tab from CLI/MCP while you work inside Cursor.**
+This project targets one job: **multi-agent access to Cursor’s Browser Tab from CLI/MCP while you work inside Cursor.** It is intentionally independent of any external-browser stack so both can coexist without coupling.
 
 ---
 
@@ -79,11 +79,13 @@ This project targets one job: **multi-agent access to Cursor’s Browser Tab fro
 ### Agent-grade interaction (ref model)
 
 - **Accessibility snapshot with refs** (`e1`, `e5`, …) — YAML-style tree agents can read and act on  
-- **Click / type / fill / hover by ref** (CSS selector fallback where supported)  
+- **Click / double-click / right-click / type / fill / hover by ref** (CSS selector fallback)  
+- **`scroll`** window or element; **`select-option`** for `<select>`  
 - **`wait`** for URL substring, visible text, ref, or CSS selector (reduces agent races)  
+- **`--wait-nav`** after click to wait for URL change; **`--snap`** to attach a fresh snapshot after interact  
 - **Lock / unlock** the tab during automation so accidental human input does not fight the agent  
 - **Resize** viewport  
-- **`open` / `nav`** return a **snapshot by default** so the next step has fresh refs  
+- **`open` / `nav`** print **snapshot text by default** (use `--json` for full payload)  
 
 ### Fast, CLI-first
 
@@ -230,6 +232,9 @@ cursor-browser [--workspace NAME|PATH] [--port N] <command> [args]
 |------|-------|-------------|
 | `--workspace <name\|path>` | `-w`, `--project` | Target Cursor window by workspace folder name or absolute path |
 | `--port <n>` | `-p` | Force a specific bridge port (skips discovery) |
+| `--json` | | Print full JSON (large trees stripped) instead of snapshot text |
+| `--snap` | `--snapshot` | After interact, attach a fresh ref snapshot |
+| `--wait-nav` | `--wait-navigation` | After click, wait for URL change |
 | `--help` | `-h` | Show usage |
 
 ### Environment variables
@@ -267,9 +272,13 @@ Legacy env names from earlier package renames may still be read by clients for c
 | Command | Description |
 |---------|-------------|
 | `snapshot` / `snap` / `refs` | Accessibility tree with refs (`e1`, …). Interactive by default |
-| `click <ref\|css>` | Click element |
+| `click <ref\|css>` | Click element (`--snap`, `--wait-nav` optional) |
+| `dblclick <ref\|css>` | Double-click |
+| `rightclick <ref\|css>` | Right-click / context menu |
 | `type <ref\|css> <text>` | Type (append) into element |
 | `fill <ref\|css> <text>` | Clear and fill element |
+| `select-option <ref\|css> <value\|label>` | Choose a `<select>` option |
+| `scroll [ref\|css] [--y N] [--top N]` | Scroll window or element |
 | `hover <ref>` | Hover by ref |
 | `press <key>` | Key press (`Enter`, `Tab`, `Escape`, …) |
 
@@ -381,9 +390,13 @@ All tools accept optional **`workspace`** (project folder name or path) unless n
 | `browser_open` | Open/reuse single tab, navigate, return ref snapshot |
 | `browser_navigate` | Navigate active tab + snapshot |
 | `browser_snapshot` | Accessibility snapshot with refs (`interactive` optional) |
-| `browser_click` | Click by `ref` or `selector` |
+| `browser_click` | Click by `ref` or `selector` (`snapshot`, `waitNavigation` optional) |
+| `browser_dblclick` | Double-click |
+| `browser_rightclick` | Right-click / context menu |
 | `browser_type` | Type (append) by `ref` or `selector` |
 | `browser_fill` | Clear + fill by `ref` or `selector` |
+| `browser_scroll` | Scroll window or element |
+| `browser_select_option` | Choose a `<select>` option by value/label/index |
 | `browser_hover` | Hover by `ref` |
 | `browser_press` | Press key (`Enter` submits forms) |
 | `browser_wait` | Wait for URL/text/ref/selector (`timeoutMs`, etc.) |
@@ -407,8 +420,12 @@ All tools accept optional **`workspace`** (project folder name or path) unless n
 `npm install -g` / `cursor-browser setup` copies `skill/SKILL.md` to:
 
 - `~/.grok/skills/cursor-browser/SKILL.md`  
-- `~/.claude/skills/cursor-browser/SKILL.md` (if that tree exists)  
-- `~/.agents/skills/cursor-browser/SKILL.md` (if that tree exists)  
+- `~/.claude/skills/cursor-browser/SKILL.md`  
+- `~/.agents/skills/cursor-browser/SKILL.md`  
+- `~/.cursor/skills/cursor-browser/SKILL.md`  
+- `~/.codex/skills/cursor-browser/SKILL.md`  
+
+The skill describes **only** the Cursor Browser Tab. It does not depend on or install any external-browser stack.
 
 The skill teaches agents:
 

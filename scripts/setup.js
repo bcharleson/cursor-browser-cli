@@ -58,14 +58,20 @@ function installExtension(version) {
       "extensions",
       `local.cursor-browser-cli-${version}`
     ),
-    // Cursor may keep a previously loaded folder name; keep 1.0.0 in sync
+    // Cursor may keep a previously loaded folder name; keep common ids in sync
+    path.join(
+      os.homedir(),
+      ".cursor",
+      "extensions",
+      "local.cursor-browser-cli-1.1.0"
+    ),
     path.join(
       os.homedir(),
       ".cursor",
       "extensions",
       "local.cursor-browser-cli-1.0.0"
     ),
-    // Legacy package names from renames
+    // Legacy package names from renames (stay on disk so old activation paths work)
     path.join(
       os.homedir(),
       ".cursor",
@@ -109,13 +115,17 @@ function installSkills() {
     console.log("    skill: skipped (SKILL.md missing)");
     return;
   }
+  // Agent skill roots only — never couples to other browser products.
   const skillRoots = [
     path.join(os.homedir(), ".grok", "skills", "cursor-browser"),
     path.join(os.homedir(), ".claude", "skills", "cursor-browser"),
     path.join(os.homedir(), ".agents", "skills", "cursor-browser"),
+    path.join(os.homedir(), ".cursor", "skills", "cursor-browser"),
+    path.join(os.homedir(), ".codex", "skills", "cursor-browser"),
   ];
   for (const root of skillRoots) {
     try {
+      // Create even if parent tooling is not installed yet so first agent run works
       fs.mkdirSync(root, { recursive: true });
       copyFile(SKILL, path.join(root, "SKILL.md"));
       console.log(`    skill → ${path.join(root, "SKILL.md")}`);
@@ -175,18 +185,28 @@ function linkLocalBin() {
   // Helps git-clone installs; npm global already puts bin on PATH
   if (process.platform === "win32") return;
   const binDir = path.join(os.homedir(), ".local", "bin");
-  const dest = path.join(binDir, "cursor-browser");
+  const links = [
+    { dest: path.join(binDir, "cursor-browser"), src: CLI },
+    { dest: path.join(binDir, "cursor-browser-mcp"), src: MCP },
+  ];
   try {
     fs.mkdirSync(binDir, { recursive: true });
-    try {
-      fs.unlinkSync(dest);
-    } catch {
-      /* ignore */
-    }
-    fs.symlinkSync(CLI, dest);
-    console.log(`    CLI link: ${dest} → ${CLI}`);
   } catch (err) {
-    console.log(`    CLI link skip: ${err.message}`);
+    console.log(`    bin dir skip: ${err.message}`);
+    return;
+  }
+  for (const { dest, src } of links) {
+    try {
+      try {
+        fs.unlinkSync(dest);
+      } catch {
+        /* ignore */
+      }
+      fs.symlinkSync(src, dest);
+      console.log(`    bin link: ${dest} → ${src}`);
+    } catch (err) {
+      console.log(`    bin link skip ${path.basename(dest)}: ${err.message}`);
+    }
   }
 }
 
@@ -210,10 +230,10 @@ function main() {
   ensureExec(path.join(ROOT, "scripts", "setup.js"));
   ensureExec(path.join(ROOT, "scripts", "install.sh"));
 
+  // Always ensure local bin links for clone installs; npm also has package bins
+  linkLocalBin();
   if (viaNpm) {
-    console.log("    CLI: npm exposes `cursor-browser` and `cursor-browser-mcp` on PATH");
-  } else {
-    linkLocalBin();
+    console.log("    CLI: npm also exposes `cursor-browser` and `cursor-browser-mcp` on PATH");
   }
 
   installExtension(version);

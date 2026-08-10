@@ -225,7 +225,8 @@ function request(method, pathname, body, port) {
       reject(
         new Error(
           `Cannot reach cursor-browser-cli on 127.0.0.1:${port} (${err.message}).\n` +
-            `Reload Cursor window after ./scripts/install.sh`
+            `Fix: cursor-browser setup → Reload Window → cursor-browser windows\n` +
+            `Then: cursor-browser --workspace <project> whoami`
         )
       );
     });
@@ -254,18 +255,60 @@ function saveScreenshot(r, outPath) {
   return { path: outPath, bytes: 0, warning: "No image payload" };
 }
 
-function print(data) {
+function extractSnapshotText(data) {
+  if (!data || typeof data !== "object") return null;
+  // Direct snapshot action: { result: { text, yaml } }
+  if (data.result?.text && data.result.yaml !== undefined) {
+    return data.result.text;
+  }
+  // open / nav / interact+--snap: { result: { snapshot: { text, yaml } } }
+  if (data.result?.snapshot?.text) {
+    return data.result.snapshot.text;
+  }
+  // Nested under action payload
+  if (data.result?.action?.snapshot?.text) {
+    return data.result.action.snapshot.text;
+  }
+  return null;
+}
+
+function slimForJson(data) {
+  if (!data || typeof data !== "object") return data;
+  try {
+    const clone = JSON.parse(JSON.stringify(data));
+    const dropTree = (snap) => {
+      if (snap && typeof snap === "object") delete snap.tree;
+    };
+    dropTree(clone.result);
+    dropTree(clone.result?.snapshot);
+    dropTree(clone.result?.action?.snapshot);
+    return clone;
+  } catch {
+    return data;
+  }
+}
+
+function print(data, { asJson = false } = {}) {
   if (typeof data === "string") {
     process.stdout.write(data.endsWith("\n") ? data : data + "\n");
     return;
   }
-  // Prefer snapshot text for readability
-  if (data?.result?.text && data.result.yaml !== undefined) {
-    process.stdout.write(data.result.text);
-    if (!data.result.text.endsWith("\n")) process.stdout.write("\n");
-    return;
+  if (!asJson) {
+    const snapText = extractSnapshotText(data);
+    if (snapText != null) {
+      // When open/nav/snap actions also include non-snapshot fields, print snap first
+      process.stdout.write(snapText.endsWith("\n") ? snapText : snapText + "\n");
+      // If there was a navigation wait or action meta, print a short footer
+      const nav = data?.result?.navigation;
+      if (nav && typeof nav === "object") {
+        process.stdout.write(
+          `# navigation: ${nav.ok === false ? "timeout" : "ok"} ${nav.from || ""} → ${nav.url || ""}\n`
+        );
+      }
+      return;
+    }
   }
-  process.stdout.write(JSON.stringify(data, null, 2) + "\n");
+  process.stdout.write(JSON.stringify(slimForJson(data), null, 2) + "\n");
 }
 
 function pkgRoot() {
@@ -285,7 +328,7 @@ function usage() {
   console.log(`cursor-browser — CLI for Cursor IDE Browser Tab (cursor-browser-cli)
 
 Usage:
-  cursor-browser [--workspace <name|path>] [--port N] <command>
+  cursor-browser [--workspace <name|path>] [--port N] [--json] [--snap] <command>
 
 Setup:
   setup | install      Install Cursor extension + skills (run after npm i -g)
@@ -295,37 +338,42 @@ Routing:
   whoami | status      Target window + health
 
 Tabs / nav:
-  open <url>           Single-tab open + navigate + snapshot
-  nav <url>            Navigate active tab + snapshot
+  open <url>           Single-tab open + navigate + snapshot (text)
+  nav <url>            Navigate active tab + snapshot (text)
   tabs | close         List / keep one tab
   lock | unlock        Lock tab from human input
   back | forward | reload
 
 Interact (prefer ref from snapshot):
-  snap | snapshot [--interactive]
-  click <ref|selector>
-  type <ref|selector> <text>
-  fill <ref|selector> <text>
+  snap | snapshot
+  click <ref|selector> [--snap] [--wait-nav]
+  dblclick <ref|selector>
+  rightclick <ref|selector>
+  type <ref|selector> <text>     # append
+  fill <ref|selector> <text>     # clear + set
+  select-option <ref|selector> <value|label>
+  scroll [ref|selector] [--y N] [--x N] [--top N]
   hover <ref>
   press Enter|Tab|Escape
 
+Flags:
+  --workspace NAME     Target Cursor window (multi-project)
+  --json               Full JSON (trees stripped)
+  --snap               Attach fresh snapshot after interact
+  --wait-nav           After click, wait for URL change
+  --timeout ms         Wait timeout (default 30000)
+
 Under the hood:
-  inspect | dom
-  console | logs
-  network
-  eval <js>
-  wait [--url substr] [--text str] [--ref e1] [--selector css] [--timeout ms]
-  resize <W> <H>
-  screenshot [path.png]
+  inspect | console | network | eval <js>
+  wait [--url substr] [--text str] [--ref e1] [--selector css]
+  resize <W> <H> | screenshot [path.png]
 
 Examples:
-  npm install -g cursor-browser-cli
   cursor-browser setup
-  cursor-browser --workspace af-exec-travel open http://localhost:3000
-  cursor-browser --workspace af-exec-travel snapshot
-  cursor-browser --workspace af-exec-travel click e5
-  cursor-browser --workspace af-exec-travel fill e3 "hello"
-  cursor-browser --workspace af-exec-travel wait --url /dashboard --timeout 15000
+  cursor-browser --workspace my-app open http://localhost:3000
+  cursor-browser --workspace my-app click e5 --snap
+  cursor-browser --workspace my-app fill e3 "hello"
+  cursor-browser --workspace my-app wait --url /dashboard --timeout 15000
 `);
 }
 
@@ -337,15 +385,38 @@ function parseArgs(argv) {
     else if (a === "--port" || a === "-p") opts.port = Number(argv[++i]);
     else if (a.startsWith("--workspace=")) opts.workspace = a.slice(12);
     else if (a === "--interactive") opts.flags.interactive = true;
+    else if (a === "--json") opts.flags.json = true;
+    else if (a === "--snap" || a === "--snapshot") opts.flags.snap = true;
+    else if (a === "--wait-nav" || a === "--wait-navigation") opts.flags.waitNav = true;
     else if (a === "--url") opts.flags.urlContains = argv[++i];
     else if (a === "--text") opts.flags.text = argv[++i];
     else if (a === "--ref") opts.flags.ref = argv[++i];
     else if (a === "--selector") opts.flags.selector = argv[++i];
     else if (a === "--timeout") opts.flags.timeoutMs = Number(argv[++i]);
+    else if (a === "--y" || a === "--delta-y") opts.flags.y = Number(argv[++i]);
+    else if (a === "--x" || a === "--delta-x") opts.flags.x = Number(argv[++i]);
+    else if (a === "--top") opts.flags.top = Number(argv[++i]);
+    else if (a === "--left") opts.flags.left = Number(argv[++i]);
+    else if (a === "--value") opts.flags.value = argv[++i];
+    else if (a === "--label") opts.flags.label = argv[++i];
+    else if (a === "--index") opts.flags.index = Number(argv[++i]);
     else if (a === "-h" || a === "--help") opts.help = true;
     else opts.rest.push(a);
   }
   return opts;
+}
+
+function interactExtras(flags) {
+  const extra = {};
+  if (flags.snap) {
+    extra.snapshot = true;
+    extra.includeSnapshot = true;
+  }
+  if (flags.waitNav) {
+    extra.waitNavigation = true;
+    if (flags.timeoutMs) extra.timeoutMs = flags.timeoutMs;
+  }
+  return extra;
 }
 
 function looksLikeRef(s) {
@@ -405,6 +476,8 @@ async function main() {
   const port = target.port;
   const action = (body) => request("POST", "/action", body, port);
   const get = (p) => request("GET", p, null, port);
+  const extra = interactExtras(opts.flags);
+  const asJson = !!opts.flags.json;
 
   try {
     let res;
@@ -460,13 +533,25 @@ async function main() {
           interactive: opts.flags.interactive !== false,
         });
         break;
-      case "click": {
+      case "click":
+      case "dblclick":
+      case "doubleclick":
+      case "double-click":
+      case "rightclick":
+      case "right-click":
+      case "contextmenu": {
         if (!rest[0]) throw new Error("ref or selector required");
         const targetEl = rest[0];
+        const kind =
+          cmd === "click"
+            ? "click"
+            : cmd.startsWith("dbl") || cmd.startsWith("double")
+              ? "dblclick"
+              : "rightclick";
         res = await action(
           looksLikeRef(targetEl)
-            ? { action: "click", ref: targetEl }
-            : { action: "click", selector: rest.join(" ") }
+            ? { action: kind, ref: targetEl, ...extra }
+            : { action: kind, selector: rest.join(" "), ...extra }
         );
         break;
       }
@@ -477,18 +562,56 @@ async function main() {
         const value = rest.slice(1).join(" ");
         res = await action(
           looksLikeRef(t)
-            ? { action: cmd, ref: t, text: value, value }
-            : { action: cmd, selector: t, text: value, value }
+            ? { action: cmd, ref: t, text: value, value, ...extra }
+            : { action: cmd, selector: t, text: value, value, ...extra }
         );
+        break;
+      }
+      case "select-option":
+      case "select_option":
+      case "option": {
+        if (!rest[0]) throw new Error("select-option <ref|selector> <value|label>");
+        const t = rest[0];
+        const choice = rest.slice(1).join(" ") || opts.flags.value || opts.flags.label;
+        const payload = {
+          action: "select-option",
+          ...(looksLikeRef(t) ? { ref: t } : { selector: t }),
+          ...extra,
+        };
+        if (opts.flags.value != null) payload.value = opts.flags.value;
+        else if (opts.flags.label != null) payload.label = opts.flags.label;
+        else if (opts.flags.index != null) payload.index = opts.flags.index;
+        else if (choice) {
+          payload.value = choice;
+          payload.label = choice;
+        } else {
+          throw new Error("select-option needs value, --label, or --index");
+        }
+        res = await action(payload);
+        break;
+      }
+      case "scroll": {
+        const t = rest[0];
+        const payload = {
+          action: "scroll",
+          x: opts.flags.x || 0,
+          y: opts.flags.y != null ? opts.flags.y : rest[1] != null ? Number(rest[1]) : undefined,
+          top: opts.flags.top,
+          left: opts.flags.left,
+          ...extra,
+        };
+        if (t && looksLikeRef(t)) payload.ref = t;
+        else if (t) payload.selector = t;
+        res = await action(payload);
         break;
       }
       case "hover":
         if (!rest[0]) throw new Error("ref required");
-        res = await action({ action: "hover", ref: rest[0] });
+        res = await action({ action: "hover", ref: rest[0], ...extra });
         break;
       case "press":
         if (!rest[0]) throw new Error("key required");
-        res = await action({ action: "press", key: rest[0] });
+        res = await action({ action: "press", key: rest[0], ...extra });
         break;
       case "wait":
       case "wait-for":
@@ -558,12 +681,46 @@ async function main() {
         res = await action({ action: "reload" });
         break;
       case "select":
+      case "select-tab":
         if (!rest[0]) throw new Error("viewId required");
-        res = await action({ action: "select", viewId: rest[0] });
+        res = await action({ action: "selectTab", viewId: rest[0] });
         break;
       default:
         usage();
         process.exit(1);
+    }
+
+    // If --snap was requested but post-action snapshot failed (common after navigation),
+    // take a separate snapshot so agents still get fresh refs.
+    if (
+      opts.flags.snap &&
+      res?.data?.ok !== false &&
+      !extractSnapshotText(res.data) &&
+      !["open", "nav", "navigate", "snap", "snapshot", "refs"].includes(cmd)
+    ) {
+      try {
+        const snapRes = await action({
+          action: "snapshot",
+          interactive: true,
+        });
+        if (snapRes.data?.ok !== false && extractSnapshotText(snapRes.data)) {
+          const base =
+            res.data?.result && typeof res.data.result === "object"
+              ? res.data.result
+              : { action: res.data?.result };
+          res.data = {
+            ok: true,
+            result: {
+              ...base,
+              snapshot: snapRes.data.result,
+              snapshotVia: "cli-fallback",
+            },
+            _cli: res.data?._cli,
+          };
+        }
+      } catch {
+        /* keep original result */
+      }
     }
 
     if (res.data && typeof res.data === "object") {
@@ -573,7 +730,7 @@ async function main() {
         workspace: target.instance?.primaryName || res.data.workspace?.primaryName,
       };
     }
-    print(res.data !== undefined ? res.data : res);
+    print(res.data !== undefined ? res.data : res, { asJson });
     if (res.data && res.data.ok === false) process.exit(2);
   } catch (err) {
     console.error(err.message || err);
