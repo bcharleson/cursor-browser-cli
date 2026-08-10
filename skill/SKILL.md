@@ -104,8 +104,17 @@ cursor-browser --workspace <name> --json open http://localhost:3000  # raw JSON
 
 | Issue | Fix |
 |-------|-----|
-| Connection refused | `cursor-browser setup` + Reload Window + `windows` |
+| Connection refused / empty `windows` | **`cursor-browser doctor`** then **`cursor-browser recover`**. If still down: Cmd+Shift+P → **Cursor Browser CLI: Restart Server** (extension must be Enabled). Browser Tab open ≠ bridge up. |
+| After reboot bridge dead | Extension did not re-activate HTTP server. `recover` clears stale port; Restart Server in the **project** Cursor window. |
 | Wrong project | `windows` then `--workspace` |
 | Element not found | New `snapshot`, use fresh ref |
 | Race / empty page | `wait --url` / `--text` / `--ref` or `--wait-nav` |
 | Noisy JSON needed | Pass `--json` |
+
+### Recovery commands
+
+```bash
+cursor-browser doctor          # diagnose ports / extension / stale state
+cursor-browser recover         # clear stale state + try restart + wait for bridge
+cursor-browser windows         # must list project with live port
+```

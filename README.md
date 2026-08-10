@@ -67,6 +67,26 @@ This project targets one job: **multi-agent access to Cursor’s Browser Tab fro
 
 ---
 
+
+## Bridge recovery (agents / post-reboot)
+
+The CLI talks to a **localhost HTTP bridge** started by the Cursor extension. The in-IDE Browser Tab can work while that bridge is down.
+
+```bash
+cursor-browser doctor     # ports, extension install, stale state
+cursor-browser recover    # clear stale state + request restart/reload + wait
+cursor-browser windows    # must list live project ports
+```
+
+`recover` is safe to run from Grok/Claude/Codex when you see `ECONNREFUSED`. It:
+
+1. Prunes dead `instances.json` / port files  
+2. Writes `~/.cursor-browser-cli/request-restart` (extension polls this)  
+3. Best-effort UI automation (optional `peekaboo` / AppleScript) to **Restart Server** or **Reload Window**  
+4. Waits until a bridge port answers  
+
+Optional env: `CURSOR_BROWSER_NO_AUTO_RECOVER=1` disables auto-recover on connection errors.
+
 ## Features
 
 ### Multi-agent by design
@@ -522,7 +542,8 @@ That continuity is the whole point of this tool.
 
 | Symptom | Fix |
 |---------|-----|
-| Connection refused | `cursor-browser setup` (or reinstall with npm), then **Reload Window**; check status bar for `:port` |
+| Connection refused / empty `windows` | **`cursor-browser doctor`** then **`cursor-browser recover`**. Clears stale ports, asks extension to restart (file trigger), optionally reloads Cursor. Browser Tab open ≠ bridge up. |
+| After reboot bridge dead | Extension host did not re-bind HTTP. `recover` → wait → `windows`. Ensure **Cursor Browser CLI** extension is Enabled. |
 | Wrong project / wrong app | `cursor-browser windows` then `--workspace <name>` |
 | Stale ref / element not found | New `snapshot` / `open` / `nav`; never reuse refs across big DOM changes |
 | Race / empty or intermediate page | `wait --url` / `--text` / `--ref` / `--selector` with a higher `--timeout` |

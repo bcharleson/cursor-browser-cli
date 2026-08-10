@@ -14,6 +14,8 @@ const INSTANCES_FILE = path.join(STATE_DIR, "instances.json");
 const PORT_FILE = path.join(STATE_DIR, "port");
 const LEGACY_PORT_FILE = path.join(os.homedir(), ".cursor-browser-bridge", "port");
 const LOG_FILE = path.join(STATE_DIR, "bridge.log");
+const REQUEST_RESTART_FILE = path.join(STATE_DIR, "request-restart");
+const REQUEST_RELOAD_FILE = path.join(STATE_DIR, "request-reload");
 const BASE_PORT = 17373;
 const MAX_PORT_TRIES = 32;
 const VERSION = "1.1.0";
@@ -1490,6 +1492,44 @@ async function activate(context) {
   );
 
   await restartServer();
+
+  // CLI can touch these files to self-heal without Command Palette
+  const pollRequests = setInterval(() => {
+    try {
+      if (fs.existsSync(REQUEST_RELOAD_FILE)) {
+        fs.unlinkSync(REQUEST_RELOAD_FILE);
+        log("request-reload received");
+        vscode.commands.executeCommand("workbench.action.reloadWindow");
+        return;
+      }
+      if (fs.existsSync(REQUEST_RESTART_FILE)) {
+        fs.unlinkSync(REQUEST_RESTART_FILE);
+        log("request-restart received");
+        restartServer().catch((e) =>
+          log("request-restart failed", e && e.message ? e.message : e)
+        );
+      }
+    } catch (e) {
+      log("request poll error", e && e.message ? e.message : e);
+    }
+  }, 1500);
+  context.subscriptions.push({ dispose: () => clearInterval(pollRequests) });
+
+  // Heartbeat: keep instances.json fresh; restart if port died
+  const heartbeat = setInterval(() => {
+    if (activePort) {
+      try {
+        registerInstance(activePort);
+      } catch (e) {
+        log("heartbeat register failed", e && e.message ? e.message : e);
+      }
+    } else {
+      restartServer().catch((e) =>
+        log("heartbeat restart failed", e && e.message ? e.message : e)
+      );
+    }
+  }, 15000);
+  context.subscriptions.push({ dispose: () => clearInterval(heartbeat) });
 }
 
 async function deactivate() {
