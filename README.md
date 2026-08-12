@@ -68,22 +68,28 @@ This project targets one job: **multi-agent access to Cursor’s Browser Tab fro
 ---
 
 
-## Bridge recovery (agents / post-reboot)
+## Bridge recovery (agents / post-reboot) — self-heal, no Peekaboo
 
 The CLI talks to a **localhost HTTP bridge** started by the Cursor extension. The in-IDE Browser Tab can work while that bridge is down.
 
 ```bash
 cursor-browser doctor     # ports, extension install, stale state
-cursor-browser recover    # clear stale state + request restart/reload + wait
+cursor-browser recover    # self-heal: clear stale + file-trigger restart/reload + wait
 cursor-browser windows    # must list live project ports
 ```
 
-`recover` is safe to run from Grok/Claude/Codex when you see `ECONNREFUSED`. It:
+`recover` is safe to run from Grok/Claude/Codex when you see `ECONNREFUSED`. It **never** uses Peekaboo or AppleScript:
 
 1. Prunes dead `instances.json` / port files  
-2. Writes `~/.cursor-browser-cli/request-restart` (extension polls this)  
-3. Best-effort UI automation (optional `peekaboo` / AppleScript) to **Restart Server** or **Reload Window**  
+2. Writes `~/.cursor-browser-cli/request-restart` (extension watches + polls → `restartServer()`)  
+3. If still down and Cursor hosts are running: writes `request-reload` (extension reloads window → re-activate)  
 4. Waits until a bridge port answers  
+
+If the extension is not loaded at all, recover cannot start the server from outside Cursor — run once:
+
+**Cmd+Shift+P → `Cursor Browser CLI: Restart Server`** (or Reload Window).
+
+The extension also **self-heals on a heartbeat**: if `activePort` is set but TCP is dead, it restarts the HTTP server without any CLI call.
 
 Optional env: `CURSOR_BROWSER_NO_AUTO_RECOVER=1` disables auto-recover on connection errors.
 

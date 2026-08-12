@@ -2,7 +2,7 @@
   "name": "cursor-browser-cli",
   "displayName": "Cursor Browser CLI",
   "description": "Drive Cursor Browser Tab from CLI / MCP (Grok, Claude Code, Codex)",
-  "version": "1.1.1",
+  "version": "1.2.1",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"

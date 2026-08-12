@@ -149,8 +149,8 @@ it will not silently open another project’s Browser Tab.
 
 | Issue | Fix |
 |-------|-----|
-| Connection refused / empty `windows` | **`cursor-browser doctor`** then **`cursor-browser recover`**. If still down: Cmd+Shift+P → **Cursor Browser CLI: Restart Server** (extension must be Enabled). Browser Tab open ≠ bridge up. |
-| After reboot bridge dead | Extension did not re-activate HTTP server. `recover` clears stale port; Restart Server in the **project** Cursor window. |
+| Connection refused / empty `windows` | **`cursor-browser doctor`** then **`cursor-browser recover`** (file-trigger self-heal; **no Peekaboo**). If still down: Cmd+Shift+P → **Cursor Browser CLI: Restart Server**. Browser Tab open ≠ bridge up. |
+| After reboot bridge dead | Extension host did not re-bind HTTP. `recover` → wait → `windows`. Or Restart Server / Reload Window once. |
 | Wrong project | `windows` → `pin` → `--workspace` or `eval $(cursor-browser pin --export)` |
 | Multiple windows error | Pass `--workspace <name>` or pin; CLI/MCP will not guess |
 | Element not found | New `snapshot`, use fresh ref |
@@ -161,7 +161,8 @@ it will not silently open another project’s Browser Tab.
 
 ```bash
 cursor-browser doctor          # diagnose ports / extension / stale state
-cursor-browser recover         # clear stale state + try restart + wait for bridge
+cursor-browser recover         # self-heal via request-restart/reload files only (no Peekaboo)
 cursor-browser windows         # must list project with live port
 cursor-browser pin             # re-discover this project → port after recover
 ```
+

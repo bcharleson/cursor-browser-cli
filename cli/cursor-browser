@@ -540,110 +540,37 @@ function cursorRunning() {
   }
 }
 
-function tryTriggerRestartViaPeekaboo(workspaceHint) {
-  // Optional: peekaboo (macOS UI automation). Not required; AppleScript + file trigger also used.
-  const which = (() => {
-    try {
-      return execSync("which peekaboo 2>/dev/null", { encoding: "utf8" }).trim();
-    } catch {
-      return "";
-    }
-  })();
-  if (!which) {
-    return { ok: false, how: "peekaboo", error: "peekaboo not on PATH (optional)" };
-  }
-  const hint = workspaceHint || process.env.CURSOR_BROWSER_WORKSPACE || "";
-  const focus =
-    hint && !hint.includes("/")
-      ? `peekaboo window focus --app Cursor --window-title ${JSON.stringify(hint)} || true`
-      : hint
-        ? `peekaboo window focus --app Cursor --window-title ${JSON.stringify(path.basename(hint))} || true`
-        : "true";
-  const runPalette = (commandTitle) => {
-    const cmds = [
-      "peekaboo app switch --to Cursor",
-      focus,
-      'peekaboo hotkey --keys "cmd,shift,p"',
-      "sleep 0.7",
-      `peekaboo type ${JSON.stringify(commandTitle)} --wpm 180`,
-      "sleep 0.4",
-      'peekaboo hotkey --keys "return"',
-    ];
-    execSync(cmds.join(" && "), {
-      stdio: "ignore",
-      timeout: 45000,
-      shell: "/bin/bash",
-    });
-  };
-  try {
-    runPalette("Cursor Browser CLI: Restart Server");
-    return { ok: true, how: "peekaboo-restart-server", workspaceHint: hint || null };
-  } catch (err) {
-    try {
-      runPalette("Developer: Reload Window");
-      return { ok: true, how: "peekaboo-reload-window", workspaceHint: hint || null };
-    } catch (err2) {
-      return {
-        ok: false,
-        how: "peekaboo",
-        error: String(err2 && err2.message ? err2.message : err2),
-      };
-    }
-  }
-}
-
-function tryTriggerRestartViaAppleScript() {
-  // Best-effort: open Command Palette and run Restart Server.
-  // Requires Accessibility permission for the process running this CLI.
-  const scriptPath = path.join(os.tmpdir(), "cursor-browser-recover.applescript");
-  const script = [
-    'tell application "Cursor" to activate',
-    "delay 0.8",
-    'tell application "System Events"',
-    "  tell process \"Cursor\"",
-    "    keystroke \"p\" using {command down, shift down}",
-    "    delay 0.6",
-    '    keystroke "Cursor Browser CLI: Restart Server"',
-    "    delay 0.5",
-    "    key code 36",
-    "  end tell",
-    "end tell",
-    "",
-  ].join("\n");
-  try {
-    fs.writeFileSync(scriptPath, script);
-    execSync(`osascript ${JSON.stringify(scriptPath)}`, {
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 20000,
-    });
-    return { ok: true, how: "applescript-command-palette", scriptPath };
-  } catch (err) {
-    const msg = String(err && err.message ? err.message : err);
-    const stderr = err && err.stderr ? String(err.stderr) : "";
-    return {
-      ok: false,
-      how: "applescript-command-palette",
-      error: msg,
-      stderr: stderr.slice(0, 500),
-      hint: "Grant Accessibility to Cursor/Terminal (System Settings → Privacy → Accessibility), or run Restart Server manually.",
-    };
-  }
-}
-
+/**
+ * Self-heal via extension file triggers only.
+ * NO Peekaboo, NO AppleScript, NO UI automation.
+ *
+ * The Cursor extension polls/watches:
+ *   ~/.cursor-browser-cli/request-restart  → restartServer()
+ *   ~/.cursor-browser-cli/request-reload   → Reload Window (re-activate extension)
+ */
 async function waitForBridge(timeoutMs = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const live = listInstances().filter((i) => portIsAlive(i.port));
     if (live.length) return live;
-    // also scan preferred range even if registry empty
     for (let p = DEFAULT_PORT; p < DEFAULT_PORT + 32; p++) {
       if (portIsAlive(p)) {
         return [{ port: p, primaryName: "discovered", discovered: true }];
       }
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 400));
   }
   return [];
+}
+
+function pendingRequestAgeMs(file) {
+  try {
+    if (!fs.existsSync(file)) return null;
+    const st = fs.statSync(file);
+    return Date.now() - st.mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 async function runDoctor({ asJson = false } = {}) {
@@ -652,9 +579,12 @@ async function runDoctor({ asJson = false } = {}) {
   for (let p = DEFAULT_PORT; p < DEFAULT_PORT + 32; p++) {
     if (portIsAlive(p)) portsLive.push(p);
   }
+  const restartAge = pendingRequestAgeMs(REQUEST_RESTART_FILE);
+  const reloadAge = pendingRequestAgeMs(REQUEST_RELOAD_FILE);
   const report = {
     ok: portsLive.length > 0,
     cli: process.argv[1],
+    version: "1.2.1",
     stateDir: STATE_DIR,
     portFile: fs.existsSync(PORT_FILE)
       ? fs.readFileSync(PORT_FILE, "utf8").trim()
@@ -664,23 +594,36 @@ async function runDoctor({ asJson = false } = {}) {
     portsListening173xx: portsLive,
     extensionInstalled: extensionInstalled(),
     cursorExtensionHostsRunning: cursorRunning(),
+    pendingRequests: {
+      restart:
+        restartAge == null
+          ? null
+          : { ageMs: restartAge, path: REQUEST_RESTART_FILE },
+      reload:
+        reloadAge == null ? null : { ageMs: reloadAge, path: REQUEST_RELOAD_FILE },
+    },
     bridgeLogTail: (() => {
       try {
         const log = path.join(STATE_DIR, "bridge.log");
         if (!fs.existsSync(log)) return null;
         const lines = fs.readFileSync(log, "utf8").trim().split("\n");
-        return lines.slice(-8);
+        return lines.slice(-12);
       } catch {
         return null;
       }
     })(),
     diagnosis: [],
     fix: [],
+    selfHeal: {
+      peekaboo: false,
+      applescript: false,
+      method: "extension-file-trigger + heartbeat",
+    },
   };
 
   if (!report.extensionInstalled.length) {
     report.diagnosis.push("Extension not installed under ~/.cursor/extensions");
-    report.fix.push("Run: cursor-browser setup  then  Developer: Reload Window");
+    report.fix.push("Run: cursor-browser setup   then  Developer: Reload Window");
   }
   if (!report.cursorExtensionHostsRunning) {
     report.diagnosis.push("Cursor extension hosts not running — open Cursor");
@@ -691,8 +634,10 @@ async function runDoctor({ asJson = false } = {}) {
       "CLI bridge HTTP server is DOWN (nothing on 127.0.0.1:1737x). " +
         "Browser Tab can still show pages — that is separate from this bridge."
     );
-    report.fix.push('Cmd+Shift+P → "Cursor Browser CLI: Restart Server"');
-    report.fix.push("Or: cursor-browser recover");
+    report.fix.push("cursor-browser recover   # file-trigger self-heal (no Peekaboo)");
+    report.fix.push(
+      'If still down: Cmd+Shift+P → "Cursor Browser CLI: Restart Server"'
+    );
     report.fix.push(
       "If command missing: Extensions → enable Cursor Browser CLI → Reload Window"
     );
@@ -703,94 +648,109 @@ async function runDoctor({ asJson = false } = {}) {
     report.diagnosis.push(
       `Stale port file points to dead port ${report.portFile}`
     );
-    report.fix.push("cursor-browser recover  (clears stale state)");
+    report.fix.push("cursor-browser recover  (clears stale state + request-restart)");
+  }
+  if (restartAge != null && restartAge > 8000 && !portsLive.length) {
+    report.diagnosis.push(
+      `request-restart pending ${Math.round(restartAge / 1000)}s — extension is NOT polling (not activated or host stuck)`
+    );
+    report.fix.push(
+      'Cmd+Shift+P → "Cursor Browser CLI: Restart Server" or "Developer: Reload Window"'
+    );
   }
 
   print(report, { asJson });
   return report;
 }
 
+/**
+ * Self-heal bridge without UI automation.
+ * 1) clear stale port/instance files
+ * 2) write request-restart (extension watches/polls)
+ * 3) wait
+ * 4) re-pulse restart; if still dead and host is running, write request-reload
+ * 5) wait again
+ */
 async function runRecover({ asJson = false, workspaceHint = null } = {}) {
   const steps = [];
   const triggers = [];
+  void workspaceHint; // reserved for future workspace-scoped triggers
 
   steps.push("clear-stale-state");
   clearStaleState();
 
-  // If any extension host is already alive, it may pick this up via file watcher
   steps.push("write-request-restart");
-  writeRestartRequest("restart");
+  const restartPath = writeRestartRequest("restart");
+  triggers.push({
+    ok: true,
+    how: "file-request-restart",
+    path: restartPath,
+    note: "Extension polls/watches this file and calls restartServer()",
+  });
 
-  if (cursorRunning()) {
-    steps.push("ui-automation-restart");
-    let trigger = tryTriggerRestartViaPeekaboo(workspaceHint);
-    triggers.push(trigger);
-    if (!trigger.ok) {
-      trigger = tryTriggerRestartViaAppleScript();
-      triggers.push(trigger);
-    }
-    // If still down after short wait, request reload (full extension re-activate)
-    let liveProbe = await waitForBridge(4000);
-    if (!liveProbe.length) {
-      steps.push("write-request-reload");
-      writeRestartRequest("reload");
-      steps.push("ui-automation-reload");
-      const reloadTrigger = tryTriggerRestartViaPeekaboo(workspaceHint);
-      // force reload path explicitly if restart typed again failed
-      if (!reloadTrigger.ok || reloadTrigger.how === "peekaboo-restart-server") {
-        try {
-          // second attempt: palette Reload Window only via AppleScript-like peekaboo helper
-          const which = execSync("which peekaboo 2>/dev/null || true", {
-            encoding: "utf8",
-          }).trim();
-          if (which) {
-            execSync(
-              [
-                "peekaboo app switch --to Cursor",
-                'peekaboo hotkey --keys "cmd,shift,p"',
-                "sleep 0.7",
-                'peekaboo type "Developer: Reload Window" --wpm 180',
-                "sleep 0.4",
-                'peekaboo hotkey --keys "return"',
-              ].join(" && "),
-              { stdio: "ignore", timeout: 45000, shell: "/bin/bash" }
-            );
-            triggers.push({ ok: true, how: "peekaboo-reload-window-forced" });
-          }
-        } catch (e) {
-          triggers.push({
-            ok: false,
-            how: "peekaboo-reload-window-forced",
-            error: String(e && e.message ? e.message : e),
-          });
-        }
-      } else {
-        triggers.push(reloadTrigger);
-      }
-    }
-  } else {
+  if (!cursorRunning()) {
     steps.push("cursor-not-running");
   }
 
-  steps.push("wait-for-bridge-15s");
-  const live = await waitForBridge(15000);
+  steps.push("wait-for-bridge-8s");
+  let live = await waitForBridge(8000);
+
+  if (!live.length) {
+    // Pulse again — covers race where first write landed before poll started
+    steps.push("write-request-restart-retry");
+    writeRestartRequest("restart");
+    triggers.push({ ok: true, how: "file-request-restart-retry" });
+    steps.push("wait-for-bridge-8s-retry");
+    live = await waitForBridge(8000);
+  }
+
+  if (!live.length && cursorRunning()) {
+    // Extension host alive but not serving HTTP → full window reload re-activates
+    steps.push("write-request-reload");
+    const reloadPath = writeRestartRequest("reload");
+    triggers.push({
+      ok: true,
+      how: "file-request-reload",
+      path: reloadPath,
+      note: "Extension executes workbench.action.reloadWindow then rebinds port",
+    });
+    steps.push("wait-for-bridge-20s-after-reload");
+    live = await waitForBridge(20000);
+  }
+
+  // Final restart pulse after possible reload
+  if (!live.length) {
+    steps.push("write-request-restart-final");
+    writeRestartRequest("restart");
+    live = await waitForBridge(6000);
+  }
 
   const result = {
     ok: live.length > 0,
+    version: "1.2.1",
+    selfHeal: {
+      peekaboo: false,
+      applescript: false,
+      method: "extension-file-trigger",
+    },
     steps,
     triggers,
     liveInstances: live,
     next:
       live.length > 0
         ? [
+            "cursor-browser doctor",
             "cursor-browser windows",
             "cursor-browser --workspace <project> open <url>",
           ]
         : [
-            "Bridge still down. Ensure Cursor is open with the project folder.",
-            "Extensions: enable **Cursor Browser CLI** (local.cursor-browser-cli).",
-            'Cmd+Shift+P → "Cursor Browser CLI: Restart Server" or "Developer: Reload Window".',
-            "Then: cursor-browser doctor && cursor-browser windows",
+            "Bridge still down after file-trigger self-heal.",
+            "Extension must be loaded in a Cursor window with a folder open.",
+            "1) Extensions: enable **Cursor Browser CLI** (local.cursor-browser-cli-1.2.1)",
+            '2) Cmd+Shift+P → "Cursor Browser CLI: Restart Server"',
+            '   or "Developer: Reload Window" (re-runs activate + listen)',
+            "3) cursor-browser doctor && cursor-browser windows",
+            "No Peekaboo / UI automation is used by recover.",
           ],
   };
   print(result, { asJson });
@@ -807,7 +767,7 @@ Usage:
 Setup:
   setup | install      Install Cursor extension + skills (run after npm i -g)
   doctor               Diagnose bridge (ports, extension, stale state)
-  recover | restart    Clear stale state + try restart bridge + wait
+  recover | restart    Self-heal bridge (file-trigger only; no Peekaboo)
 
 Routing (do this first with multiple Cursor projects open):
   windows              List live bridges: project → port

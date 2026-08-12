@@ -5,6 +5,7 @@
  */
 const vscode = require("vscode");
 const http = require("http");
+const net = require("net");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -18,7 +19,7 @@ const REQUEST_RESTART_FILE = path.join(STATE_DIR, "request-restart");
 const REQUEST_RELOAD_FILE = path.join(STATE_DIR, "request-reload");
 const BASE_PORT = 17373;
 const MAX_PORT_TRIES = 32;
-const VERSION = "1.1.0";
+const VERSION = "1.2.1";
 
 let server = null;
 let statusBar = null;
@@ -1428,7 +1429,23 @@ function updateStatusBar(ok) {
   statusBar.show();
 }
 
+/** True if something accepts TCP on 127.0.0.1:port (our bridge health). */
+function portAcceptsConnections(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port: Number(port) }, () => {
+      socket.end();
+      resolve(true);
+    });
+    socket.on("error", () => resolve(false));
+    socket.setTimeout(400, () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
 async function restartServer() {
+  log("restartServer begin", { hadServer: !!server, activePort });
   await stopServer();
   const cfg = vscode.workspace.getConfiguration("cursorBrowserCli");
   // also accept old config key
@@ -1436,6 +1453,7 @@ async function restartServer() {
   const enabled = cfg.get("enabled", old.get("enabled", true));
   if (!enabled) {
     updateStatusBar(false);
+    log("restartServer skipped — cursorBrowserCli.enabled=false");
     return;
   }
   const preferred = cfg.get("port", old.get("port", BASE_PORT));
@@ -1444,19 +1462,43 @@ async function restartServer() {
     try {
       server = await startServer(p);
       updateStatusBar(true);
+      log("restartServer ok", p, "v" + VERSION);
       return;
     } catch (err) {
       lastErr = err;
     }
   }
+  log("restartServer failed", lastErr && lastErr.message ? lastErr.message : lastErr);
   vscode.window.showErrorMessage(
     `cursor-browser-cli failed to start: ${lastErr && lastErr.message}`
   );
   updateStatusBar(false);
 }
 
+function consumeCliRequests() {
+  try {
+    if (fs.existsSync(REQUEST_RELOAD_FILE)) {
+      fs.unlinkSync(REQUEST_RELOAD_FILE);
+      log("request-reload received");
+      vscode.commands.executeCommand("workbench.action.reloadWindow");
+      return "reload";
+    }
+    if (fs.existsSync(REQUEST_RESTART_FILE)) {
+      fs.unlinkSync(REQUEST_RESTART_FILE);
+      log("request-restart received");
+      restartServer().catch((e) =>
+        log("request-restart failed", e && e.message ? e.message : e)
+      );
+      return "restart";
+    }
+  } catch (e) {
+    log("request poll error", e && e.message ? e.message : e);
+  }
+  return null;
+}
+
 async function activate(context) {
-  log("activate", workspaceInfo());
+  log("activate", VERSION, workspaceInfo());
   statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     100
@@ -1468,7 +1510,7 @@ async function activate(context) {
     vscode.commands.registerCommand("cursorBrowserCli.status", async () => {
       const s = await handleAction({ action: "status" });
       vscode.window.showInformationMessage(
-        `cursor-browser-cli :${s.port} ${s.workspace?.primaryName || ""}`
+        `cursor-browser-cli v${VERSION} :${s.port} ${s.workspace?.primaryName || ""}`
       );
     })
   );
@@ -1483,6 +1525,11 @@ async function activate(context) {
       vscode.commands.executeCommand("cursorBrowserCli.status")
     )
   );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("cursorBrowserBridge.restart", () =>
+      vscode.commands.executeCommand("cursorBrowserCli.restart")
+    )
+  );
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
@@ -1493,42 +1540,57 @@ async function activate(context) {
 
   await restartServer();
 
-  // CLI can touch these files to self-heal without Command Palette
+  // CLI self-heal: file triggers only (no Peekaboo / UI automation)
+  fs.mkdirSync(STATE_DIR, { recursive: true });
   const pollRequests = setInterval(() => {
-    try {
-      if (fs.existsSync(REQUEST_RELOAD_FILE)) {
-        fs.unlinkSync(REQUEST_RELOAD_FILE);
-        log("request-reload received");
-        vscode.commands.executeCommand("workbench.action.reloadWindow");
-        return;
-      }
-      if (fs.existsSync(REQUEST_RESTART_FILE)) {
-        fs.unlinkSync(REQUEST_RESTART_FILE);
-        log("request-restart received");
-        restartServer().catch((e) =>
-          log("request-restart failed", e && e.message ? e.message : e)
-        );
-      }
-    } catch (e) {
-      log("request poll error", e && e.message ? e.message : e);
-    }
-  }, 1500);
+    consumeCliRequests();
+  }, 750);
   context.subscriptions.push({ dispose: () => clearInterval(pollRequests) });
 
-  // Heartbeat: keep instances.json fresh; restart if port died
-  const heartbeat = setInterval(() => {
-    if (activePort) {
-      try {
-        registerInstance(activePort);
-      } catch (e) {
-        log("heartbeat register failed", e && e.message ? e.message : e);
+  // Immediate reaction when CLI writes request-* files
+  try {
+    const watcher = fs.watch(STATE_DIR, { persistent: false }, (_evt, filename) => {
+      if (!filename) return;
+      const name = String(filename);
+      if (name === "request-restart" || name === "request-reload") {
+        consumeCliRequests();
       }
-    } else {
-      restartServer().catch((e) =>
-        log("heartbeat restart failed", e && e.message ? e.message : e)
-      );
-    }
-  }, 15000);
+    });
+    context.subscriptions.push({ dispose: () => watcher.close() });
+  } catch (e) {
+    log("fs.watch STATE_DIR failed (poll still active)", e && e.message ? e.message : e);
+  }
+
+  // Heartbeat: re-register; if port is dead (or unset), restart bridge
+  let heartbeatBusy = false;
+  const heartbeat = setInterval(() => {
+    if (heartbeatBusy) return;
+    heartbeatBusy = true;
+    (async () => {
+      try {
+        if (!activePort) {
+          log("heartbeat: no activePort — restarting");
+          await restartServer();
+          return;
+        }
+        const alive = await portAcceptsConnections(activePort);
+        if (!alive) {
+          log("heartbeat: port dead — restarting", activePort);
+          await restartServer();
+          return;
+        }
+        try {
+          registerInstance(activePort);
+        } catch (e) {
+          log("heartbeat register failed", e && e.message ? e.message : e);
+        }
+      } catch (e) {
+        log("heartbeat error", e && e.message ? e.message : e);
+      } finally {
+        heartbeatBusy = false;
+      }
+    })();
+  }, 8000);
   context.subscriptions.push({ dispose: () => clearInterval(heartbeat) });
 }
 

@@ -63,6 +63,18 @@ function installExtension(version) {
       os.homedir(),
       ".cursor",
       "extensions",
+      "local.cursor-browser-cli-1.2.1"
+    ),
+    path.join(
+      os.homedir(),
+      ".cursor",
+      "extensions",
+      "local.cursor-browser-cli-1.1.1"
+    ),
+    path.join(
+      os.homedir(),
+      ".cursor",
+      "extensions",
       "local.cursor-browser-cli-1.1.0"
     ),
     path.join(
