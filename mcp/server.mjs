@@ -293,7 +293,7 @@ const WS = {
   workspace: {
     type: "string",
     description:
-      "REQUIRED with multiple Cursor projects open. Project folder name or absolute path (e.g. af-exec-travel). Get from browser_resolve / browser_windows.",
+      "REQUIRED with multiple Cursor projects open. Project folder name or absolute path (e.g. my-app). Get from browser_resolve / browser_windows.",
   },
 };
 
@@ -906,7 +906,7 @@ process.stdin.on("data", async (chunk) => {
           result: {
             protocolVersion: "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "cursor-browser-cli", version: "1.2.0" },
+            serverInfo: { name: "cursor-browser-cli", version: "1.2.2" },
           },
         });
       } else if (method === "notifications/initialized" || method === "initialized") {

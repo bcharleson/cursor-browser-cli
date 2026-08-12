@@ -21,6 +21,8 @@ const LEGACY_PORT = path.join(os.homedir(), ".cursor-browser-bridge", "port");
 const DEFAULT_PORT = 17373;
 const REQUEST_RESTART_FILE = path.join(STATE_DIR, "request-restart");
 const REQUEST_RELOAD_FILE = path.join(STATE_DIR, "request-reload");
+/** Keep in sync with extension/package.json + package.json */
+const CLI_VERSION = "1.2.2";
 
 function readInstances() {
   for (const f of [INSTANCES_FILE, LEGACY_INSTANCES]) {
@@ -491,11 +493,30 @@ function runSetup() {
 function writeRestartRequest(kind = "restart") {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   const file = kind === "reload" ? REQUEST_RELOAD_FILE : REQUEST_RESTART_FILE;
+  // Unique token so EVERY Cursor window can handle the same request once
+  // (extensions no longer delete the file; we clear after wait).
+  const token = `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
   fs.writeFileSync(
     file,
-    JSON.stringify({ at: new Date().toISOString(), pid: process.pid, kind }) + "\n"
+    JSON.stringify({
+      at: new Date().toISOString(),
+      pid: process.pid,
+      kind,
+      token,
+      cliVersion: CLI_VERSION,
+    }) + "\n"
   );
-  return file;
+  return { file, token };
+}
+
+function clearRequestFiles() {
+  for (const f of [REQUEST_RESTART_FILE, REQUEST_RELOAD_FILE]) {
+    try {
+      if (fs.existsSync(f)) fs.unlinkSync(f);
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 function clearStaleState() {
@@ -505,11 +526,8 @@ function clearStaleState() {
   } catch {
     /* ignore */
   }
-  try {
-    fs.writeFileSync(INSTANCES_FILE, "{}\n");
-  } catch {
-    /* ignore */
-  }
+  // Soft prune: drop dead ports only (do not wipe live multi-window registry)
+  pruneStaleRegistry();
   try {
     if (fs.existsSync(LEGACY_PORT)) fs.unlinkSync(LEGACY_PORT);
   } catch {
@@ -541,8 +559,7 @@ function cursorRunning() {
 }
 
 /**
- * Self-heal via extension file triggers only.
- * NO Peekaboo, NO AppleScript, NO UI automation.
+ * Self-heal via extension file triggers only (no UI automation).
  *
  * The Cursor extension polls/watches:
  *   ~/.cursor-browser-cli/request-restart  → restartServer()
@@ -573,6 +590,39 @@ function pendingRequestAgeMs(file) {
   }
 }
 
+async function probeLiveVersions() {
+  const live = listInstances().filter((i) => portIsAlive(i.port));
+  const out = [];
+  for (const inst of live) {
+    try {
+      const r = await request("GET", "/whoami", null, inst.port);
+      out.push({
+        port: inst.port,
+        primaryName:
+          r.data?.workspace?.primaryName || inst.primaryName || null,
+        version: r.data?.version || null,
+        live: true,
+      });
+    } catch {
+      out.push({
+        port: inst.port,
+        primaryName: inst.primaryName || null,
+        version: null,
+        live: portIsAlive(inst.port),
+      });
+    }
+  }
+  return out;
+}
+
+function versionSkew(probed, expected = CLI_VERSION) {
+  const stale = probed.filter(
+    (p) => p.live && p.version && p.version !== expected
+  );
+  const unknown = probed.filter((p) => p.live && !p.version);
+  return { stale, unknown, expected };
+}
+
 async function runDoctor({ asJson = false } = {}) {
   pruneStaleRegistry();
   const portsLive = [];
@@ -581,16 +631,19 @@ async function runDoctor({ asJson = false } = {}) {
   }
   const restartAge = pendingRequestAgeMs(REQUEST_RESTART_FILE);
   const reloadAge = pendingRequestAgeMs(REQUEST_RELOAD_FILE);
+  const probed = portsLive.length ? await probeLiveVersions() : [];
+  const skew = versionSkew(probed);
   const report = {
-    ok: portsLive.length > 0,
+    ok: portsLive.length > 0 && skew.stale.length === 0,
     cli: process.argv[1],
-    version: "1.2.1",
+    version: CLI_VERSION,
     stateDir: STATE_DIR,
     portFile: fs.existsSync(PORT_FILE)
       ? fs.readFileSync(PORT_FILE, "utf8").trim()
       : null,
     instancesFile: readInstances(),
     instancesLive: listInstances(),
+    bridges: probed,
     portsListening173xx: portsLive,
     extensionInstalled: extensionInstalled(),
     cursorExtensionHostsRunning: cursorRunning(),
@@ -615,9 +668,7 @@ async function runDoctor({ asJson = false } = {}) {
     diagnosis: [],
     fix: [],
     selfHeal: {
-      peekaboo: false,
-      applescript: false,
-      method: "extension-file-trigger + heartbeat",
+      method: "extension-file-trigger + multi-window tokens + heartbeat",
     },
   };
 
@@ -634,7 +685,12 @@ async function runDoctor({ asJson = false } = {}) {
       "CLI bridge HTTP server is DOWN (nothing on 127.0.0.1:1737x). " +
         "Browser Tab can still show pages — that is separate from this bridge."
     );
-    report.fix.push("cursor-browser recover   # file-trigger self-heal (no Peekaboo)");
+    report.fix.push(
+      "cursor-browser recover   # file-trigger self-heal"
+    );
+    report.fix.push(
+      "cursor-browser ensure    # diagnose + heal + verify"
+    );
     report.fix.push(
       'If still down: Cmd+Shift+P → "Cursor Browser CLI: Restart Server"'
     );
@@ -644,11 +700,26 @@ async function runDoctor({ asJson = false } = {}) {
   } else {
     report.diagnosis.push(`Bridge alive on port(s): ${portsLive.join(", ")}`);
   }
+  if (skew.stale.length) {
+    report.diagnosis.push(
+      `Version skew: CLI is ${CLI_VERSION} but live bridges still report: ` +
+        skew.stale
+          .map((s) => `${s.primaryName || s.port}=${s.version}`)
+          .join(", ") +
+        ". Extension hosts need a window reload to load new code (restart alone is not enough)."
+    );
+    report.fix.push(
+      "cursor-browser recover --reload   # multi-window file-trigger reload"
+    );
+    report.fix.push("cursor-browser ensure --reload");
+  }
   if (report.portFile && !portsLive.includes(Number(report.portFile))) {
     report.diagnosis.push(
       `Stale port file points to dead port ${report.portFile}`
     );
-    report.fix.push("cursor-browser recover  (clears stale state + request-restart)");
+    report.fix.push(
+      "cursor-browser recover  (clears stale state + request-restart)"
+    );
   }
   if (restartAge != null && restartAge > 8000 && !portsLive.length) {
     report.diagnosis.push(
@@ -665,13 +736,21 @@ async function runDoctor({ asJson = false } = {}) {
 
 /**
  * Self-heal bridge without UI automation.
- * 1) clear stale port/instance files
- * 2) write request-restart (extension watches/polls)
+ * 1) prune dead ports
+ * 2) write request-restart token (ALL windows restart; they do not delete the file)
  * 3) wait
- * 4) re-pulse restart; if still dead and host is running, write request-reload
- * 5) wait again
+ * 4) optional / fallback: request-reload token (ALL windows reload)
+ * 5) clear request files
+ *
+ * @param {{ asJson?: boolean, workspaceHint?: string|null, forceReload?: boolean }} opts
  */
-async function runRecover({ asJson = false, workspaceHint = null } = {}) {
+async function runRecover({
+  asJson = false,
+  workspaceHint = null,
+  forceReload = false,
+  noExit = false,
+  quiet = false,
+} = {}) {
   const steps = [];
   const triggers = [];
   void workspaceHint; // reserved for future workspace-scoped triggers
@@ -679,83 +758,316 @@ async function runRecover({ asJson = false, workspaceHint = null } = {}) {
   steps.push("clear-stale-state");
   clearStaleState();
 
-  steps.push("write-request-restart");
-  const restartPath = writeRestartRequest("restart");
-  triggers.push({
-    ok: true,
-    how: "file-request-restart",
-    path: restartPath,
-    note: "Extension polls/watches this file and calls restartServer()",
-  });
+  let live = [];
 
-  if (!cursorRunning()) {
-    steps.push("cursor-not-running");
-  }
-
-  steps.push("wait-for-bridge-8s");
-  let live = await waitForBridge(8000);
-
-  if (!live.length) {
-    // Pulse again — covers race where first write landed before poll started
-    steps.push("write-request-restart-retry");
-    writeRestartRequest("restart");
-    triggers.push({ ok: true, how: "file-request-restart-retry" });
-    steps.push("wait-for-bridge-8s-retry");
-    live = await waitForBridge(8000);
-  }
-
-  if (!live.length && cursorRunning()) {
-    // Extension host alive but not serving HTTP → full window reload re-activates
+  if (forceReload) {
+    // Code update path: HTTP restart cannot swap loaded extension JS
     steps.push("write-request-reload");
-    const reloadPath = writeRestartRequest("reload");
+    const { file, token } = writeRestartRequest("reload");
     triggers.push({
       ok: true,
       how: "file-request-reload",
-      path: reloadPath,
-      note: "Extension executes workbench.action.reloadWindow then rebinds port",
+      path: file,
+      token,
+      note: "Every extension host reloads once per token (multi-window safe on 1.2.2+)",
     });
-    steps.push("wait-for-bridge-20s-after-reload");
-    live = await waitForBridge(20000);
+    steps.push("wait-for-bridge-15s-after-reload");
+    live = await waitForBridge(15000);
+
+    // Probe versions early — pre-1.2.2 hosts delete the reload file after first window
+    let earlyBridges = [];
+    try {
+      earlyBridges = await probeLiveVersions();
+    } catch {
+      /* ignore */
+    }
+    let earlySkew = versionSkew(earlyBridges);
+    if (
+      earlySkew.stale.length > 0 ||
+      !earlyBridges.length ||
+      earlyBridges.every((b) => b.version !== CLI_VERSION)
+    ) {
+      // Last resort: recycle user extension hosts so Cursor reloads extension JS from disk
+      steps.push("recycle-user-extension-hosts");
+      const killed = recycleUserExtensionHosts();
+      triggers.push({
+        ok: true,
+        how: "sigterm-user-extension-hosts",
+        killed,
+        note: "No UI automation — Cursor respawns hosts and re-activates from disk",
+      });
+      // Leave a restart token for hosts as they come back
+      writeRestartRequest("restart");
+      steps.push("wait-for-bridge-30s-after-recycle");
+      live = await waitForBridge(30000);
+    } else {
+      steps.push("write-request-restart-after-reload");
+      const r2 = writeRestartRequest("restart");
+      triggers.push({
+        ok: true,
+        how: "file-request-restart-after-reload",
+        token: r2.token,
+      });
+      steps.push("wait-for-bridge-10s");
+      live = await waitForBridge(10000);
+    }
+  } else {
+    steps.push("write-request-restart");
+    const r1 = writeRestartRequest("restart");
+    triggers.push({
+      ok: true,
+      how: "file-request-restart",
+      path: r1.file,
+      token: r1.token,
+      note: "Every extension host restarts HTTP once per token (multi-window safe)",
+    });
+
+    if (!cursorRunning()) {
+      steps.push("cursor-not-running");
+    }
+
+    steps.push("wait-for-bridge-10s");
+    live = await waitForBridge(10000);
+
+    if (!live.length) {
+      steps.push("write-request-restart-retry");
+      const rRetry = writeRestartRequest("restart");
+      triggers.push({
+        ok: true,
+        how: "file-request-restart-retry",
+        token: rRetry.token,
+      });
+      steps.push("wait-for-bridge-10s-retry");
+      live = await waitForBridge(10000);
+    }
+
+    if (!live.length && cursorRunning()) {
+      steps.push("write-request-reload");
+      const rReload = writeRestartRequest("reload");
+      triggers.push({
+        ok: true,
+        how: "file-request-reload",
+        path: rReload.file,
+        token: rReload.token,
+        note: "Extension executes workbench.action.reloadWindow then rebinds port",
+      });
+      steps.push("wait-for-bridge-25s-after-reload");
+      live = await waitForBridge(25000);
+    }
+
+    if (!live.length) {
+      steps.push("write-request-restart-final");
+      writeRestartRequest("restart");
+      live = await waitForBridge(8000);
+    }
   }
 
-  // Final restart pulse after possible reload
-  if (!live.length) {
-    steps.push("write-request-restart-final");
-    writeRestartRequest("restart");
-    live = await waitForBridge(6000);
+  // Give multi-window hosts a moment after last write, then clear triggers
+  await new Promise((r) => setTimeout(r, 1500));
+  steps.push("clear-request-files");
+  clearRequestFiles();
+
+  // Re-probe versions when possible
+  let bridges = [];
+  try {
+    bridges = await probeLiveVersions();
+  } catch {
+    bridges = live;
   }
+  const skew = versionSkew(bridges);
+  const versionsOk = bridges.length > 0 && skew.stale.length === 0;
 
   const result = {
     ok: live.length > 0,
-    version: "1.2.1",
+    versionsOk,
+    version: CLI_VERSION,
     selfHeal: {
-      peekaboo: false,
-      applescript: false,
-      method: "extension-file-trigger",
+      method: "extension-file-trigger-multi-window",
     },
     steps,
     triggers,
     liveInstances: live,
+    bridges,
+    versionSkew: skew.stale,
     next:
       live.length > 0
-        ? [
-            "cursor-browser doctor",
-            "cursor-browser windows",
-            "cursor-browser --workspace <project> open <url>",
-          ]
+        ? versionsOk
+          ? [
+              "cursor-browser doctor",
+              "cursor-browser windows",
+              "cursor-browser --workspace <project> open <url>",
+            ]
+          : [
+              "Bridges are up but still on an old extension version.",
+              "cursor-browser recover --reload",
+              "Or: Cmd+Shift+P → Developer: Reload Window (each project)",
+            ]
         : [
             "Bridge still down after file-trigger self-heal.",
             "Extension must be loaded in a Cursor window with a folder open.",
-            "1) Extensions: enable **Cursor Browser CLI** (local.cursor-browser-cli-1.2.1)",
+            `1) Extensions: enable **Cursor Browser CLI** (local.cursor-browser-cli-${CLI_VERSION})`,
             '2) Cmd+Shift+P → "Cursor Browser CLI: Restart Server"',
             '   or "Developer: Reload Window" (re-runs activate + listen)',
-            "3) cursor-browser doctor && cursor-browser windows",
-            "No Peekaboo / UI automation is used by recover.",
+            "3) cursor-browser ensure",
           ],
+  };
+  if (!quiet) print(result, { asJson });
+  if (!result.ok && !noExit) process.exit(2);
+  return result;
+}
+
+async function runDoctorSilent() {
+  pruneStaleRegistry();
+  const portsLive = [];
+  for (let p = DEFAULT_PORT; p < DEFAULT_PORT + 32; p++) {
+    if (portIsAlive(p)) portsLive.push(p);
+  }
+  const bridges = portsLive.length ? await probeLiveVersions() : [];
+  const skew = versionSkew(bridges);
+  return {
+    ok: portsLive.length > 0 && skew.stale.length === 0,
+    portsListening173xx: portsLive,
+    bridges,
+    diagnosis:
+      portsLive.length === 0
+        ? ["bridge-down"]
+        : skew.stale.length
+          ? ["version-skew"]
+          : ["healthy"],
+    fix: [],
+  };
+}
+
+/**
+ * Bulletproof path: setup files → diagnose → heal → optional reload → verify.
+ */
+async function runEnsure({
+  asJson = false,
+  forceReload = false,
+  skipSetup = false,
+} = {}) {
+  const steps = [];
+  if (!skipSetup) {
+    try {
+      steps.push("setup");
+      runSetup();
+    } catch (e) {
+      steps.push("setup-failed:" + String(e.message || e));
+    }
+  }
+
+  steps.push("doctor-before");
+  const before = await runDoctorSilent();
+  const skew = versionSkew(before.bridges || []);
+  const needHeal =
+    !before.portsListening173xx?.length ||
+    forceReload ||
+    skew.stale.length > 0;
+
+  let recoverResult = null;
+  if (needHeal) {
+    const useReload = forceReload || skew.stale.length > 0;
+    steps.push(useReload ? "recover-force-reload" : "recover-restart");
+    recoverResult = await runRecover({
+      asJson: true,
+      forceReload: useReload,
+      noExit: true,
+      quiet: true,
+    });
+  } else {
+    steps.push("already-healthy");
+  }
+
+  steps.push("doctor-after");
+  const after = await runDoctorSilent();
+  const skewAfter = versionSkew(after.bridges || []);
+  const result = {
+    ok:
+      (after.portsListening173xx || []).length > 0 &&
+      skewAfter.stale.length === 0,
+    version: CLI_VERSION,
+    steps,
+    before: {
+      ports: before.portsListening173xx,
+      bridges: before.bridges,
+      diagnosis: before.diagnosis,
+    },
+    recover: recoverResult
+      ? {
+          ok: recoverResult.ok,
+          versionsOk: recoverResult.versionsOk,
+          steps: recoverResult.steps,
+          versionSkew: recoverResult.versionSkew,
+        }
+      : null,
+    after: {
+      ports: after.portsListening173xx,
+      bridges: after.bridges,
+      diagnosis: after.diagnosis,
+    },
+    selfHeal: {
+      method: "ensure = setup + doctor + recover + verify",
+    },
+    next: !((after.portsListening173xx || []).length > 0)
+      ? [
+          "Open Cursor with a project folder",
+          "Enable extension Cursor Browser CLI",
+          "cursor-browser ensure --reload",
+        ]
+      : skewAfter.stale.length
+        ? [
+            "Hosts still on old code after reload attempt.",
+            "Manually: Cmd+Shift+P → Developer: Reload Window in each project",
+            "Then: cursor-browser doctor",
+          ]
+        : ["cursor-browser windows", "cursor-browser pin"],
   };
   print(result, { asJson });
   if (!result.ok) process.exit(2);
   return result;
+}
+
+function reexecSelfAfterRecover() {
+  const { spawnSync } = require("child_process");
+  const env = {
+    ...process.env,
+    CURSOR_BROWSER_RECOVERED: "1",
+  };
+  const r = spawnSync(process.execPath, process.argv.slice(1), {
+    stdio: "inherit",
+    env,
+  });
+  process.exit(r.status == null ? 1 : r.status);
+}
+
+/**
+ * Last-resort: SIGTERM Cursor *user* extension-host
+ * processes so Cursor respawns them and re-activates extensions from disk.
+ * Only used when forceReload still sees version skew (pre-token hosts delete the
+ * request-reload file after the first window handles it).
+ */
+function recycleUserExtensionHosts() {
+  const killed = [];
+  try {
+    const out = execSync(
+      'pgrep -fl "Cursor Helper \\(Plugin\\): extension-host \\(user\\)" 2>/dev/null || true',
+      { encoding: "utf8" }
+    );
+    for (const line of out.split("\n")) {
+      if (!line.trim()) continue;
+      const pid = Number(line.trim().split(/\s+/)[0]);
+      if (!pid || !Number.isFinite(pid)) continue;
+      try {
+        process.kill(pid, "SIGTERM");
+        killed.push(pid);
+      } catch {
+        /* already gone */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return killed;
 }
 
 function usage() {
@@ -764,10 +1076,13 @@ function usage() {
 Usage:
   cursor-browser [--workspace <name|path>] [--port N] [--json] [--snap] <command>
 
-Setup:
+Setup / self-heal:
   setup | install      Install Cursor extension + skills (run after npm i -g)
-  doctor               Diagnose bridge (ports, extension, stale state)
-  recover | restart    Self-heal bridge (file-trigger only; no Peekaboo)
+  doctor               Diagnose bridge (ports, extension, version skew, stale state)
+  recover | restart    Self-heal: multi-window file-trigger restart (+ reload fallback)
+  recover --reload     Force all Cursor windows to reload extension code
+  ensure               setup + doctor + heal + verify (bulletproof one-shot)
+  ensure --reload      ensure and force extension reload (after upgrades)
 
 Routing (do this first with multiple Cursor projects open):
   windows              List live bridges: project → port
@@ -801,6 +1116,7 @@ Flags:
   --snap               Attach fresh snapshot after interact
   --wait-nav           After click, wait for URL change
   --timeout ms         Wait timeout (default 30000)
+  --reload             With recover/ensure: force multi-window extension reload
 
 Under the hood:
   inspect | console | network | eval <js>
@@ -832,6 +1148,7 @@ function parseArgs(argv) {
     else if (a.startsWith("--workspace=")) opts.workspace = a.slice(12);
     else if (a === "--interactive") opts.flags.interactive = true;
     else if (a === "--json") opts.flags.json = true;
+    else if (a === "--reload" || a === "--force-reload") opts.flags.reload = true;
     else if (a === "--export") opts.flags.export = true;
     else if (a === "--snap" || a === "--snapshot") opts.flags.snap = true;
     else if (a === "--wait-nav" || a === "--wait-navigation") opts.flags.waitNav = true;
@@ -904,6 +1221,20 @@ async function main() {
       await runRecover({
         asJson: !!opts.flags.json,
         workspaceHint: opts.workspace || process.env.CURSOR_BROWSER_WORKSPACE || null,
+        forceReload: !!opts.flags.reload,
+      });
+    } catch (err) {
+      console.error(err.message || err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (cmd === "ensure" || cmd === "heal" || cmd === "bulletproof") {
+    try {
+      await runEnsure({
+        asJson: !!opts.flags.json,
+        forceReload: !!opts.flags.reload,
       });
     } catch (err) {
       console.error(err.message || err);
@@ -1244,16 +1575,32 @@ async function main() {
     const isConn =
       /ECONNREFUSED|Cannot reach cursor-browser-cli|default-no-bridge/i.test(msg) ||
       target?.how === "default-no-bridge";
-    if (isConn && !process.env.CURSOR_BROWSER_NO_AUTO_RECOVER) {
+    if (
+      isConn &&
+      !process.env.CURSOR_BROWSER_NO_AUTO_RECOVER &&
+      !process.env.CURSOR_BROWSER_RECOVERED
+    ) {
       console.error(msg);
-      console.error("\n[cursor-browser] Attempting auto-recover...");
+      console.error(
+        "\n[cursor-browser] Attempting auto-recover (file-trigger)..."
+      );
       try {
-        await runRecover({
+        const rec = await runRecover({
           asJson: !!opts.flags.json,
           workspaceHint: opts.workspace || null,
+          noExit: true,
+          quiet: !opts.flags.json,
         });
-        console.error("[cursor-browser] Recover reported live bridge. Re-run your command.");
-        process.exit(3);
+        if (!rec.ok) {
+          console.error(
+            "[cursor-browser] Auto-recover failed. Run: cursor-browser ensure --reload"
+          );
+          process.exit(1);
+        }
+        console.error(
+          "[cursor-browser] Bridge live — retrying your command once..."
+        );
+        reexecSelfAfterRecover();
       } catch (recErr) {
         console.error(String(recErr.message || recErr));
         process.exit(1);

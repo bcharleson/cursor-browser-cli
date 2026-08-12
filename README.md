@@ -68,17 +68,20 @@ This project targets one job: **multi-agent access to Cursor’s Browser Tab fro
 ---
 
 
-## Bridge recovery (agents / post-reboot) — self-heal, no Peekaboo
+## Bridge recovery (agents / post-reboot)
 
 The CLI talks to a **localhost HTTP bridge** started by the Cursor extension. The in-IDE Browser Tab can work while that bridge is down.
 
 ```bash
-cursor-browser doctor     # ports, extension install, stale state
-cursor-browser recover    # self-heal: clear stale + file-trigger restart/reload + wait
-cursor-browser windows    # must list live project ports
+cursor-browser ensure            # setup + doctor + heal + verify (preferred)
+cursor-browser ensure --reload   # after upgrades — multi-window extension code reload
+cursor-browser doctor            # ports, extension, version skew, stale state
+cursor-browser recover           # self-heal: multi-window restart tokens + wait
+cursor-browser recover --reload  # force all windows to reload extension code
+cursor-browser windows           # must list live project ports + versions
 ```
 
-`recover` is safe to run from Grok/Claude/Codex when you see `ECONNREFUSED`. It **never** uses Peekaboo or AppleScript:
+`recover` / `ensure` are safe to run from Grok/Claude/Codex when you see `ECONNREFUSED`. They self-heal with file triggers only:
 
 1. Prunes dead `instances.json` / port files  
 2. Writes `~/.cursor-browser-cli/request-restart` (extension watches + polls → `restartServer()`)  
@@ -369,7 +372,7 @@ eval $(cursor-browser pin --export)
 cursor-browser whoami
 cursor-browser open http://localhost:3000
 # or without env:
-cursor-browser --workspace af-exec-travel open http://localhost:3000
+cursor-browser --workspace my-app open http://localhost:3000
 ```
 
 `pin` / `resolve` output (human):

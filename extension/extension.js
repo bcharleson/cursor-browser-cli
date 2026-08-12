@@ -19,13 +19,16 @@ const REQUEST_RESTART_FILE = path.join(STATE_DIR, "request-restart");
 const REQUEST_RELOAD_FILE = path.join(STATE_DIR, "request-reload");
 const BASE_PORT = 17373;
 const MAX_PORT_TRIES = 32;
-const VERSION = "1.2.1";
+const VERSION = "1.2.2";
 
 let server = null;
 let statusBar = null;
 let activePort = null;
 let instanceId = null;
 let SNAPSHOT_JS = null;
+/** Multi-window: each host handles a request token once; CLI deletes files after wait. */
+let lastRestartToken = null;
+let lastReloadToken = null;
 
 function log(...args) {
   const line = `[${new Date().toISOString()}] ${args.map(String).join(" ")}\n`;
@@ -1475,17 +1478,46 @@ async function restartServer() {
   updateStatusBar(false);
 }
 
+/**
+ * Read a CLI request file. Content is JSON `{ token, at, kind }` (or plain text token).
+ * IMPORTANT: do NOT unlink here — every Cursor window must observe the same token.
+ * The CLI clears request files after its wait window.
+ */
+function readRequestToken(file) {
+  try {
+    if (!fs.existsSync(file)) return null;
+    const raw = fs.readFileSync(file, "utf8").trim();
+    if (!raw) {
+      // empty touch still counts — use mtime as token
+      return `mtime:${fs.statSync(file).mtimeMs}`;
+    }
+    try {
+      const j = JSON.parse(raw);
+      if (j && (j.token || j.at)) return String(j.token || j.at);
+    } catch {
+      /* plain token */
+    }
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
 function consumeCliRequests() {
   try {
-    if (fs.existsSync(REQUEST_RELOAD_FILE)) {
-      fs.unlinkSync(REQUEST_RELOAD_FILE);
-      log("request-reload received");
+    const reloadToken = readRequestToken(REQUEST_RELOAD_FILE);
+    if (reloadToken && reloadToken !== lastReloadToken) {
+      lastReloadToken = reloadToken;
+      log("request-reload received", reloadToken.slice(0, 48));
+      // Full window reload re-activates extension with latest disk code
       vscode.commands.executeCommand("workbench.action.reloadWindow");
       return "reload";
     }
-    if (fs.existsSync(REQUEST_RESTART_FILE)) {
-      fs.unlinkSync(REQUEST_RESTART_FILE);
-      log("request-restart received");
+
+    const restartToken = readRequestToken(REQUEST_RESTART_FILE);
+    if (restartToken && restartToken !== lastRestartToken) {
+      lastRestartToken = restartToken;
+      log("request-restart received", restartToken.slice(0, 48));
       restartServer().catch((e) =>
         log("request-restart failed", e && e.message ? e.message : e)
       );
@@ -1498,7 +1530,13 @@ function consumeCliRequests() {
 }
 
 async function activate(context) {
-  log("activate", VERSION, workspaceInfo());
+  const ws = workspaceInfo();
+  log(
+    "activate",
+    VERSION,
+    ws?.primaryName || ws?.primaryPath || "(no folder)",
+    ws?.workspacePaths ? `paths=${ws.workspacePaths.length}` : ""
+  );
   statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     100
@@ -1540,11 +1578,19 @@ async function activate(context) {
 
   await restartServer();
 
-  // CLI self-heal: file triggers only (no Peekaboo / UI automation)
+  // CLI self-heal: file triggers only (no UI automation)
   fs.mkdirSync(STATE_DIR, { recursive: true });
+  // Drain any request left from before activate (multi-window reload race)
+  try {
+    consumeCliRequests();
+  } catch (e) {
+    log("initial consume failed", e && e.message ? e.message : e);
+  }
+
+  // Poll frequently so multi-window hosts all see the same token quickly
   const pollRequests = setInterval(() => {
     consumeCliRequests();
-  }, 750);
+  }, 500);
   context.subscriptions.push({ dispose: () => clearInterval(pollRequests) });
 
   // Immediate reaction when CLI writes request-* files
@@ -1568,6 +1614,8 @@ async function activate(context) {
     heartbeatBusy = true;
     (async () => {
       try {
+        // Always drain CLI requests in the heartbeat path too
+        consumeCliRequests();
         if (!activePort) {
           log("heartbeat: no activePort — restarting");
           await restartServer();
@@ -1590,7 +1638,7 @@ async function activate(context) {
         heartbeatBusy = false;
       }
     })();
-  }, 8000);
+  }, 5000);
   context.subscriptions.push({ dispose: () => clearInterval(heartbeat) });
 }
 

@@ -18,7 +18,7 @@ separate and independent — use those when you need a full browser profile,
 existing cookie sessions, or non-Cursor windows. Prefer this tool for day-to-day
 app UI work inside Cursor (local servers, fast ref loops, same tab as the IDE).
 
-Install path: `~/Developer/cursor-browser-cli` (or your clone / global npm).
+Install via `npm install -g cursor-browser-cli`, or clone this repo and run `npm install`.
 
 ## Always pin the project first (required multi-window)
 
@@ -149,8 +149,9 @@ it will not silently open another project’s Browser Tab.
 
 | Issue | Fix |
 |-------|-----|
-| Connection refused / empty `windows` | **`cursor-browser doctor`** then **`cursor-browser recover`** (file-trigger self-heal; **no Peekaboo**). If still down: Cmd+Shift+P → **Cursor Browser CLI: Restart Server**. Browser Tab open ≠ bridge up. |
-| After reboot bridge dead | Extension host did not re-bind HTTP. `recover` → wait → `windows`. Or Restart Server / Reload Window once. |
+| Connection refused / empty `windows` | **`cursor-browser ensure`** (or `doctor` + `recover`). Auto-recover also retries your command once. If still down: Cmd+Shift+P → **Cursor Browser CLI: Restart Server**. Browser Tab open ≠ bridge up. |
+| After reboot / npm upgrade version skew | **`cursor-browser ensure --reload`** — multi-window file-trigger reload loads new extension JS (restart alone does not). |
+| After reboot bridge dead | Extension host did not re-bind HTTP. `ensure` / `recover` → wait → `windows`. Or Restart Server / Reload Window once. |
 | Wrong project | `windows` → `pin` → `--workspace` or `eval $(cursor-browser pin --export)` |
 | Multiple windows error | Pass `--workspace <name>` or pin; CLI/MCP will not guess |
 | Element not found | New `snapshot`, use fresh ref |
@@ -160,9 +161,15 @@ it will not silently open another project’s Browser Tab.
 ### Recovery commands
 
 ```bash
-cursor-browser doctor          # diagnose ports / extension / stale state
-cursor-browser recover         # self-heal via request-restart/reload files only (no Peekaboo)
-cursor-browser windows         # must list project with live port
-cursor-browser pin             # re-discover this project → port after recover
+cursor-browser ensure            # setup + doctor + heal + verify (preferred)
+cursor-browser ensure --reload   # after upgrades — reload extension code in all windows
+cursor-browser doctor            # ports, version skew, stale state
+cursor-browser recover           # multi-window restart tokens
+cursor-browser recover --reload  # multi-window window-reload tokens
+cursor-browser windows           # must list project with live port + version
+cursor-browser pin               # re-discover this project → port after recover
 ```
+
+Self-heal writes tokens under `~/.cursor-browser-cli/`; every open Cursor window
+polls/watches those files. On connection errors the CLI auto-recovers and **retries once**.
 

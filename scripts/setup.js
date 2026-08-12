@@ -51,58 +51,34 @@ function copyFile(src, dest) {
 }
 
 function installExtension(version) {
-  const targets = [
-    path.join(
-      os.homedir(),
-      ".cursor",
-      "extensions",
-      `local.cursor-browser-cli-${version}`
-    ),
-    // Cursor may keep a previously loaded folder name; keep common ids in sync
-    path.join(
-      os.homedir(),
-      ".cursor",
-      "extensions",
-      "local.cursor-browser-cli-1.2.1"
-    ),
-    path.join(
-      os.homedir(),
-      ".cursor",
-      "extensions",
-      "local.cursor-browser-cli-1.1.1"
-    ),
-    path.join(
-      os.homedir(),
-      ".cursor",
-      "extensions",
-      "local.cursor-browser-cli-1.1.0"
-    ),
-    path.join(
-      os.homedir(),
-      ".cursor",
-      "extensions",
-      "local.cursor-browser-cli-1.0.0"
-    ),
-    // Legacy package names from renames (stay on disk so old activation paths work)
-    path.join(
-      os.homedir(),
-      ".cursor",
-      "extensions",
-      "local.cursor-browser-bridge-0.3.0"
-    ),
-    path.join(
-      os.homedir(),
-      ".cursor",
-      "extensions",
-      "local.cursor-browser-bridge-0.2.0"
-    ),
-    path.join(
-      os.homedir(),
-      ".cursor",
-      "extensions",
-      "local.cursor-browser-bridge-0.1.0"
-    ),
-  ];
+  const extRoot = path.join(os.homedir(), ".cursor", "extensions");
+  // Always install current version id + keep any previously loaded folder names
+  // in sync so a Cursor window that still references an old path gets new code.
+  const targets = new Set([
+    path.join(extRoot, `local.cursor-browser-cli-${version}`),
+    path.join(extRoot, "local.cursor-browser-cli-1.2.2"),
+    path.join(extRoot, "local.cursor-browser-cli-1.2.1"),
+    path.join(extRoot, "local.cursor-browser-cli-1.1.1"),
+    path.join(extRoot, "local.cursor-browser-cli-1.1.0"),
+    path.join(extRoot, "local.cursor-browser-cli-1.0.0"),
+    // Legacy package names from renames
+    path.join(extRoot, "local.cursor-browser-bridge-0.3.0"),
+    path.join(extRoot, "local.cursor-browser-bridge-0.2.0"),
+    path.join(extRoot, "local.cursor-browser-bridge-0.1.0"),
+  ]);
+
+  try {
+    for (const d of fs.readdirSync(extRoot)) {
+      if (
+        d.startsWith("local.cursor-browser-cli-") ||
+        d.startsWith("local.cursor-browser-bridge-")
+      ) {
+        targets.add(path.join(extRoot, d));
+      }
+    }
+  } catch {
+    /* ignore */
+  }
 
   const files = ["package.json", "extension.js", "snapshot.js"];
   for (const f of files) {
