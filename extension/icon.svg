@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3a3e"/>
+      <stop offset="1" stop-color="#121214"/>
+    </linearGradient>
+    <filter id="lift" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="8" stdDeviation="6" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+    <filter id="pointerShadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="3" stdDeviation="2.2" flood-color="#000" flood-opacity="0.4"/>
+    </filter>
+    <clipPath id="win">
+      <rect x="40" y="46" width="152" height="150" rx="16"/>
+    </clipPath>
+  </defs>
+
+  <rect x="6" y="6" width="244" height="244" rx="54" fill="url(#tile)"/>
+  <rect x="7" y="7" width="242" height="242" rx="53" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2"/>
+
+  <g filter="url(#lift)">
+    <g clip-path="url(#win)">
+      <rect x="40" y="46" width="152" height="150" fill="#F4F1EA"/>
+      <rect x="40" y="46" width="152" height="36" fill="#E3DED2"/>
+      <circle cx="62" cy="64" r="4.5" fill="#C4BEB0"/>
+      <circle cx="78" cy="64" r="4.5" fill="#C4BEB0"/>
+      <circle cx="94" cy="64" r="4.5" fill="#C4BEB0"/>
+      <rect x="56" y="98" width="92" height="7" rx="3.5" fill="#D9D3C6"/>
+      <rect x="56" y="114" width="116" height="7" rx="3.5" fill="#D9D3C6"/>
+      <rect x="56" y="132" width="112" height="22" rx="5" fill="#F5C400"/>
+      <path d="M66 138.5 L75 144 L66 149.5" fill="none" stroke="#1A1A1A" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="82" y="142" width="26" height="3.5" rx="1.6" fill="#1A1A1A"/>
+      <rect x="56" y="166" width="74" height="7" rx="3.5" fill="#D9D3C6"/>
+    </g>
+    <rect x="40" y="46" width="152" height="150" rx="16" fill="none" stroke="#1A1A1A" stroke-opacity="0.18" stroke-width="2"/>
+  </g>
+
+  <g filter="url(#pointerShadow)" transform="translate(142,124)">
+    <path d="M6 3 L6 52 L19 39 L30 62 L40 57 L28.5 34.5 L48 34.5 Z" fill="#FFFFFF" stroke="#1A1A1A" stroke-width="3.2" stroke-linejoin="round"/>
+  </g>
+</svg>

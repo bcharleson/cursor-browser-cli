@@ -21,8 +21,10 @@ const LEGACY_PORT = path.join(os.homedir(), ".cursor-browser-bridge", "port");
 const DEFAULT_PORT = 17373;
 const REQUEST_RESTART_FILE = path.join(STATE_DIR, "request-restart");
 const REQUEST_RELOAD_FILE = path.join(STATE_DIR, "request-reload");
-/** Keep in sync with extension/package.json + package.json */
-const CLI_VERSION = "1.2.2";
+/** Same version as the repo package.json (npm + extension). */
+const CLI_VERSION = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")
+).version;
 
 function readInstances() {
   for (const f of [INSTANCES_FILE, LEGACY_INSTANCES]) {
@@ -540,7 +542,11 @@ function extensionInstalled() {
   try {
     return fs
       .readdirSync(extRoot)
-      .filter((d) => d.startsWith("local.cursor-browser-cli-"));
+      .filter(
+        (d) =>
+          d.startsWith("bcharleson.cursor-browser-cli-") ||
+          d.startsWith("local.cursor-browser-cli-")
+      );
   } catch {
     return [];
   }
@@ -905,7 +911,7 @@ async function runRecover({
         : [
             "Bridge still down after file-trigger self-heal.",
             "Extension must be loaded in a Cursor window with a folder open.",
-            `1) Extensions: enable **Cursor Browser CLI** (local.cursor-browser-cli-${CLI_VERSION})`,
+            `1) Extensions: enable **Cursor Browser CLI** (bcharleson.cursor-browser-cli-${CLI_VERSION})`,
             '2) Cmd+Shift+P → "Cursor Browser CLI: Restart Server"',
             '   or "Developer: Reload Window" (re-runs activate + listen)',
             "3) cursor-browser ensure",

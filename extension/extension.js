@@ -19,7 +19,13 @@ const REQUEST_RESTART_FILE = path.join(STATE_DIR, "request-restart");
 const REQUEST_RELOAD_FILE = path.join(STATE_DIR, "request-reload");
 const BASE_PORT = 17373;
 const MAX_PORT_TRIES = 32;
-const VERSION = "1.2.2";
+const VERSION = require("./package.json").version;
+
+function isCursorHost() {
+  const app = String((vscode.env && vscode.env.appName) || "");
+  if (!app) return true;
+  return /cursor/i.test(app);
+}
 
 let server = null;
 let statusBar = null;
@@ -1320,21 +1326,25 @@ function sendJson(res, status, data) {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body),
-    "Access-Control-Allow-Origin": "*",
   });
   res.end(body);
+}
+
+function browserOrigin(req) {
+  const origin = req.headers.origin || req.headers.referer;
+  return origin ? String(origin) : "";
 }
 
 function startServer(port) {
   return new Promise((resolve, reject) => {
     const s = http.createServer(async (req, res) => {
-      if (req.method === "OPTIONS") {
-        res.writeHead(204, {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
+      // CLI and MCP are Node clients and send no Origin. A web page does.
+      // Refuse those so a site the user visits cannot drive the Browser Tab.
+      if (req.method === "OPTIONS" || browserOrigin(req)) {
+        return sendJson(res, 403, {
+          ok: false,
+          error: "This bridge accepts local CLI and MCP clients only.",
         });
-        return res.end();
       }
       try {
         const u = new URL(req.url || "/", `http://127.0.0.1:${port}`);
@@ -1355,7 +1365,7 @@ function startServer(port) {
         }
         if (req.method === "POST" && (u.pathname === "/action" || u.pathname === "/" || u.pathname === "/tool")) {
           const body = await readBody(req);
-          // Support Vectorly-style { name, args }
+          // Accept { name, args } tool calls as well as { action }.
           if (body.name && !body.action) {
             body.action = String(body.name).replace(/^browser_/, "").replace(/_/g, "-");
             // map browser_navigate -> navigate, etc.
@@ -1530,6 +1540,22 @@ function consumeCliRequests() {
 }
 
 async function activate(context) {
+  if (!isCursorHost()) {
+    const item = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      100
+    );
+    item.text = "$(warning) Browser CLI needs Cursor";
+    item.tooltip =
+      "Cursor Browser CLI drives Cursor's Browser Tab. It does not run in VS Code.";
+    item.show();
+    context.subscriptions.push(item);
+    vscode.window.showWarningMessage(
+      "Cursor Browser CLI only works inside Cursor. It drives Cursor's Browser Tab and does nothing in VS Code."
+    );
+    return;
+  }
+
   const ws = workspaceInfo();
   log(
     "activate",

@@ -19,22 +19,53 @@ const CLI = path.join(ROOT, "cli", "cursor-browser");
 const MCP = path.join(ROOT, "mcp", "server.mjs");
 const SKILL = path.join(ROOT, "skill", "SKILL.md");
 
-function readVersion() {
+function readExtensionMeta() {
+  const pkg = JSON.parse(
+    fs.readFileSync(path.join(EXT_DIR, "package.json"), "utf8")
+  );
+  return {
+    version: pkg.version || "1.0.0",
+    publisher: pkg.publisher || "bcharleson",
+    name: pkg.name || "cursor-browser-cli",
+  };
+}
+
+function marketplaceReadme() {
+  return fs
+    .readFileSync(path.join(ROOT, "README.md"), "utf8")
+    .replaceAll("](extension/icon.png)", "](icon.png)");
+}
+
+function syncExtensionsManifest(extRoot, folderName, meta) {
+  const manifestPath = path.join(extRoot, "extensions.json");
+  let entries = [];
   try {
-    const pkg = JSON.parse(
-      fs.readFileSync(path.join(EXT_DIR, "package.json"), "utf8")
-    );
-    return pkg.version || "1.0.0";
+    entries = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    if (!Array.isArray(entries)) return;
   } catch {
-    try {
-      const pkg = JSON.parse(
-        fs.readFileSync(path.join(ROOT, "package.json"), "utf8")
-      );
-      return pkg.version || "1.0.0";
-    } catch {
-      return "1.0.0";
-    }
+    return;
   }
+  const id = `${meta.publisher}.${meta.name}`;
+  const next = entries.filter((entry) => {
+    const entryId = entry && entry.identifier && entry.identifier.id;
+    if (!entryId) return true;
+    if (entryId === id) return false;
+    if (entryId === "local.cursor-browser-cli") return false;
+    if (entryId === "local.cursor-browser-bridge") return false;
+    return true;
+  });
+  next.push({
+    identifier: { id },
+    version: meta.version,
+    location: {
+      $mid: 1,
+      path: path.join(extRoot, folderName),
+      scheme: "file",
+    },
+    relativeLocation: folderName,
+  });
+  fs.writeFileSync(manifestPath, JSON.stringify(next));
+  console.log(`    extensions.json → ${id}@${meta.version}`);
 }
 
 function ensureExec(file) {
@@ -50,37 +81,31 @@ function copyFile(src, dest) {
   fs.copyFileSync(src, dest);
 }
 
-function installExtension(version) {
+function installExtension(meta) {
   const extRoot = path.join(os.homedir(), ".cursor", "extensions");
-  // Always install current version id + keep any previously loaded folder names
-  // in sync so a Cursor window that still references an old path gets new code.
-  const targets = new Set([
-    path.join(extRoot, `local.cursor-browser-cli-${version}`),
-    path.join(extRoot, "local.cursor-browser-cli-1.2.2"),
-    path.join(extRoot, "local.cursor-browser-cli-1.2.1"),
-    path.join(extRoot, "local.cursor-browser-cli-1.1.1"),
-    path.join(extRoot, "local.cursor-browser-cli-1.1.0"),
-    path.join(extRoot, "local.cursor-browser-cli-1.0.0"),
-    // Legacy package names from renames
-    path.join(extRoot, "local.cursor-browser-bridge-0.3.0"),
-    path.join(extRoot, "local.cursor-browser-bridge-0.2.0"),
-    path.join(extRoot, "local.cursor-browser-bridge-0.1.0"),
-  ]);
+  fs.mkdirSync(extRoot, { recursive: true });
+  const folderName = `${meta.publisher}.${meta.name}-${meta.version}`;
+  const target = path.join(extRoot, folderName);
 
+  // One publisher, one folder. Old "local.*" copies used the same commands
+  // and would activate beside this one.
+  let entries = [];
   try {
-    for (const d of fs.readdirSync(extRoot)) {
-      if (
-        d.startsWith("local.cursor-browser-cli-") ||
-        d.startsWith("local.cursor-browser-bridge-")
-      ) {
-        targets.add(path.join(extRoot, d));
-      }
-    }
+    entries = fs.readdirSync(extRoot);
   } catch {
-    /* ignore */
+    entries = [];
+  }
+  for (const name of entries) {
+    const legacy =
+      name.startsWith("local.cursor-browser-cli-") ||
+      name.startsWith("local.cursor-browser-bridge-") ||
+      (name.startsWith(`${meta.publisher}.${meta.name}-`) && name !== folderName);
+    if (!legacy) continue;
+    fs.rmSync(path.join(extRoot, name), { recursive: true, force: true });
+    console.log(`    removed ${name}`);
   }
 
-  const files = ["package.json", "extension.js", "snapshot.js"];
+  const files = ["package.json", "extension.js", "snapshot.js", "icon.png"];
   for (const f of files) {
     const p = path.join(EXT_DIR, f);
     if (!fs.existsSync(p)) {
@@ -88,14 +113,15 @@ function installExtension(version) {
     }
   }
 
-  for (const target of targets) {
-    fs.rmSync(target, { recursive: true, force: true });
-    fs.mkdirSync(target, { recursive: true });
-    for (const f of files) {
-      copyFile(path.join(EXT_DIR, f), path.join(target, f));
-    }
-    console.log(`    extension → ${target}`);
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.mkdirSync(target, { recursive: true });
+  for (const f of files) {
+    copyFile(path.join(EXT_DIR, f), path.join(target, f));
   }
+  fs.writeFileSync(path.join(target, "README.md"), marketplaceReadme());
+  copyFile(path.join(ROOT, "LICENSE"), path.join(target, "LICENSE"));
+  console.log(`    extension → ${target}`);
+  syncExtensionsManifest(extRoot, folderName, meta);
 }
 
 function installSkills() {
@@ -207,7 +233,8 @@ function main() {
     return;
   }
 
-  const version = readVersion();
+  const meta = readExtensionMeta();
+  const version = meta.version;
   const viaNpm = Boolean(process.env.npm_lifecycle_event);
 
   console.log(`==> cursor-browser-cli setup v${version}`);
@@ -224,7 +251,7 @@ function main() {
     console.log("    CLI: npm also exposes `cursor-browser` and `cursor-browser-mcp` on PATH");
   }
 
-  installExtension(version);
+  installExtension(meta);
   installSkills();
   tryMcpHints();
 

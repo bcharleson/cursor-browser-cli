@@ -1,6 +1,10 @@
 # cursor-browser-cli
 
+![Cursor Browser CLI](extension/icon.png)
+
 **Drive Cursor IDE’s built-in Browser Tab from any CLI agent or shell** — Grok Build, Claude Code, Codex, OpenCode, or plain terminal — without leaving Cursor and without spinning up a separate Chrome/Playwright stack.
+
+**Cursor only.** This drives Cursor’s Browser Tab (`cursor.browserView`). It does not run in Visual Studio Code. Unofficial, and not affiliated with Cursor or Anysphere.
 
 Stay in a long chat in Cursor’s integrated terminal. Navigate, take **accessibility snapshots with refs**, click/type/fill by **ref**, wait for page state, lock the tab, screenshot, and inspect console/network/DOM — all on the **same** Browser Tab you already see in the IDE.
 
@@ -145,6 +149,8 @@ Optional env: `CURSOR_BROWSER_NO_AUTO_RECOVER=1` disables auto-recover on connec
 - **Node.js ≥ 18** (CLI + MCP; no production npm dependencies)  
 - macOS / Linux / Windows (where Cursor runs)
 
+Visual Studio Code does not have Cursor’s Browser Tab API. Installed there, the extension shows a status-bar notice and does not start the bridge.
+
 ---
 
 ## Install (recommended: npm)
@@ -202,6 +208,8 @@ npm install          # runs setup
 |-----------------|---------|
 | **Cursor Browser CLI: Show Status** | Health + workspace/port |
 | **Cursor Browser CLI: Restart Server** | Restart the localhost HTTP server |
+
+Extension id: `bcharleson.cursor-browser-cli`.
 
 ### Settings
 
@@ -583,7 +591,8 @@ That continuity is the whole point of this tool.
 ## Security
 
 - The HTTP server binds to **loopback only** (`127.0.0.1`).  
-- Anyone who can reach that port on your machine can drive the Browser Tab (navigate, click, **run page JS**, read console/network).  
+- Requests that carry a browser `Origin` or `Referer` are refused. CLI and MCP clients do not send those headers, so a website you visit cannot call the bridge.  
+- Any other process on your machine can still drive the Browser Tab (navigate, click, **run page JS**, read console/network).  
 - Treat it like a **local debugger**: do not tunnel or expose the port; do not run on untrusted multi-user machines without isolation.  
 - `eval` / `browser_evaluate` execute arbitrary page JavaScript — only run code you trust.
 
@@ -618,13 +627,16 @@ cursor-browser-cli/
 ├── cli/
 │   └── cursor-browser      # CLI entry (Node)
 ├── extension/
-│   ├── package.json
+│   ├── package.json        # publisher bcharleson, icon, gallery text
 │   ├── extension.js        # HTTP API + cursor.browserView.*
-│   └── snapshot.js         # Accessibility snapshot + refs
+│   ├── snapshot.js         # Accessibility snapshot + refs
+│   ├── icon.svg            # source art
+│   └── icon.png            # Extensions view + Open VSX icon
 ├── mcp/
 │   └── server.mjs          # MCP stdio server → bin: cursor-browser-mcp
 ├── scripts/
 │   ├── setup.js            # extension + skills install
+│   ├── package-vsix.js     # gallery package (does not publish)
 │   └── install.sh          # thin wrapper → setup.js
 └── skill/
     └── SKILL.md            # Agent skill template
@@ -640,7 +652,28 @@ cursor-browser-cli/
 - Preferred port configurable via `cursorBrowserCli.port`  
 - Clients still understand legacy state dirs / names from earlier renames for smoother upgrades  
 - After changing extension code: `cursor-browser setup` (or `npm run setup`) and **Reload Window**  
-- Publish: `npm publish` (requires npm login)
+- npm package: `npm publish` (requires npm login)  
+- Extension gallery package: `npm run package:vsix` (see below; this does not publish)
+
+---
+
+## Publishing the extension
+
+The Extensions row that says **local** is a sideload. `cursor-browser setup` copies the extension into `~/.cursor/extensions/`. Cursor did not fetch it from a gallery, so the publisher was the placeholder `local` and there was no icon.
+
+Cursor’s Extensions search reads **Open VSX** (Eclipse), through Cursor’s marketplace proxy. It does not read Microsoft’s Visual Studio Marketplace. A Microsoft-only publish will not make this appear for Cursor users. Open VSX is the listing that reaches people in the Extensions panel you are looking at. The same `.vsix` can also go to the Visual Studio Marketplace later, for people browsing VS Code’s store. That second listing still only works inside Cursor.
+
+Extension id: `bcharleson.cursor-browser-cli`.
+
+1. Create an Eclipse account and claim the **bcharleson** namespace at [open-vsx.org](https://open-vsx.org).
+2. Create an access token there.
+3. From this repo: `npm run package:vsix`
+4. Publish that file: `npx ovsx publish cursor-browser-cli-1.3.0.vsix -p "$OVSX_PAT"`
+5. In Cursor, search **Cursor Browser CLI**. The row should show this icon and the publisher **bcharleson**.
+
+The Visual Studio Marketplace is a separate account (publisher id `bcharleson`, a PAT). Publish there only after Open VSX is live, with the same version. VS Code users still do not get a Browser Tab.
+
+Tagged GitHub releases are the source release. npm (`npm publish`) and Open VSX (`ovsx publish`) are separate logins. This repository does not store those tokens.
 
 ---
 

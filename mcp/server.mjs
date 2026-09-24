@@ -7,6 +7,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const SERVER_VERSION = JSON.parse(
+  fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"),
+    "utf8"
+  )
+).version;
 
 const STATE_DIR = path.join(os.homedir(), ".cursor-browser-cli");
 const INSTANCES_FILE = path.join(STATE_DIR, "instances.json");
@@ -906,7 +914,7 @@ process.stdin.on("data", async (chunk) => {
           result: {
             protocolVersion: "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "cursor-browser-cli", version: "1.2.2" },
+            serverInfo: { name: "cursor-browser-cli", version: SERVER_VERSION },
           },
         });
       } else if (method === "notifications/initialized" || method === "initialized") {

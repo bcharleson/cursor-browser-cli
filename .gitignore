@@ -3,6 +3,7 @@ node_modules/
 *.log
 dist/
 *.vsix
+*.tgz
 .vscode-test/
 .idea/
 *.swp

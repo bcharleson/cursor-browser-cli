@@ -1,6 +1,6 @@
 {
   "name": "cursor-browser-cli",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "CLI + MCP to drive Cursor IDE's built-in Browser Tab from Grok Build, Claude Code, Codex, or shell",
   "private": false,
   "license": "MIT",
@@ -44,7 +44,8 @@
     "postinstall": "node ./scripts/setup.js",
     "install-cli": "node ./scripts/setup.js",
     "mcp": "node ./mcp/server.mjs",
-    "prepublishOnly": "node -e \"require('fs').accessSync('cli/cursor-browser'); require('fs').accessSync('extension/extension.js'); require('fs').accessSync('mcp/server.mjs');\""
+    "prepublishOnly": "node -e \"require('fs').accessSync('cli/cursor-browser'); require('fs').accessSync('extension/extension.js'); require('fs').accessSync('extension/icon.png'); require('fs').accessSync('mcp/server.mjs');\"",
+    "package:vsix": "node ./scripts/package-vsix.js"
   },
   "engines": {
     "node": ">=18"

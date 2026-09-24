@@ -1,9 +1,37 @@
 {
   "name": "cursor-browser-cli",
   "displayName": "Cursor Browser CLI",
-  "description": "Drive Cursor Browser Tab from CLI / MCP (Grok, Claude Code, Codex)",
-  "version": "1.2.2",
-  "publisher": "local",
+  "description": "Drive Cursor's Browser Tab from any CLI or MCP",
+  "version": "1.3.0",
+  "publisher": "bcharleson",
+  "author": "Brandon Charleson",
+  "license": "MIT",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bcharleson/cursor-browser-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bcharleson/cursor-browser-cli/issues"
+  },
+  "homepage": "https://github.com/bcharleson/cursor-browser-cli#readme",
+  "qna": "https://github.com/bcharleson/cursor-browser-cli/issues",
+  "galleryBanner": {
+    "color": "#141416",
+    "theme": "dark"
+  },
+  "keywords": [
+    "cursor",
+    "browser",
+    "browser-tab",
+    "cli",
+    "mcp",
+    "agent",
+    "claude",
+    "codex",
+    "grok",
+    "automation"
+  ],
   "engines": {
     "vscode": "^1.90.0"
   },
