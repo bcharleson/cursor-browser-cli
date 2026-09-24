@@ -63,6 +63,12 @@ function syncExtensionsManifest(extRoot, folderName, meta) {
       scheme: "file",
     },
     relativeLocation: folderName,
+    metadata: {
+      installedTimestamp: Date.now(),
+      pinned: true,
+      source: "vsix",
+      publisherDisplayName: "B. Charleson",
+    },
   });
   fs.writeFileSync(manifestPath, JSON.stringify(next));
   console.log(`    extensions.json → ${id}@${meta.version}`);

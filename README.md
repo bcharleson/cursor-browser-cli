@@ -1,10 +1,23 @@
-# cursor-browser-cli
+# Cursor Browser CLI
 
 ![Cursor Browser CLI](extension/icon.png)
 
-**Drive Cursor IDE’s built-in Browser Tab from any CLI agent or shell** — Grok Build, Claude Code, Codex, OpenCode, or plain terminal — without leaving Cursor and without spinning up a separate Chrome/Playwright stack.
+**B. Charleson**
 
-**Cursor only.** This drives Cursor’s Browser Tab (`cursor.browserView`). It does not run in Visual Studio Code. Unofficial, and not affiliated with Cursor or Anysphere.
+This is the extension, CLI, and MCP server that let an agent drive the Browser Tab already open in Cursor. Grok Build, Claude Code, Codex, OpenCode, or a shell can navigate, snapshot, click, and type on that same tab. The bridge listens on your machine only.
+
+| | |
+|---|---|
+| Author | B. Charleson |
+| Extension id | `bcharleson.cursor-browser-cli` |
+| License | MIT |
+| Requires | Cursor, with its Browser Tab |
+| Does not run in | Visual Studio Code |
+| Network | `127.0.0.1` only. No account, no telemetry. |
+
+Unofficial. Not affiliated with Cursor or Anysphere.
+
+**Drive Cursor IDE’s built-in Browser Tab from any CLI agent or shell** — without leaving Cursor and without spinning up a separate Chrome/Playwright stack.
 
 Stay in a long chat in Cursor’s integrated terminal. Navigate, take **accessibility snapshots with refs**, click/type/fill by **ref**, wait for page state, lock the tab, screenshot, and inspect console/network/DOM — all on the **same** Browser Tab you already see in the IDE.
 
@@ -665,7 +678,7 @@ Cursor’s Extensions search reads **Open VSX** (Eclipse), through Cursor’s ma
 
 Extension id: `bcharleson.cursor-browser-cli`.
 
-1. Create an Eclipse account and claim the **bcharleson** namespace at [open-vsx.org](https://open-vsx.org).
+1. Create an Eclipse account and claim the **bcharleson** namespace at [open-vsx.org](https://open-vsx.org). Set the namespace display name to **B. Charleson**. That name is what Cursor shows under the extension title. The id stays `bcharleson`.
 2. Create an access token there.
 3. From this repo: `npm run package:vsix`
 4. Publish that file: `npx ovsx publish cursor-browser-cli-1.3.0.vsix -p "$OVSX_PAT"`

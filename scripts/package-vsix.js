@@ -30,8 +30,8 @@ const vsce = fs.existsSync(localVsce) ? localVsce : null;
 
 const cmd = vsce || "npx";
 const args = vsce
-  ? ["package", "--out", out, "--no-dependencies"]
-  : ["--yes", "@vscode/vsce", "package", "--out", out, "--no-dependencies"];
+  ? ["package", "--out", out, "--no-dependencies", "--no-rewrite-relative-links"]
+  : ["--yes", "@vscode/vsce", "package", "--out", out, "--no-dependencies", "--no-rewrite-relative-links"];
 
 const result = spawnSync(cmd, args, { cwd: stage, stdio: "inherit" });
 fs.rmSync(stage, { recursive: true, force: true });
