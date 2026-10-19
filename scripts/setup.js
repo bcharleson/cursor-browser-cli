@@ -111,7 +111,7 @@ function installExtension(meta) {
     console.log(`    removed ${name}`);
   }
 
-  const files = ["package.json", "extension.js", "snapshot.js", "icon.png"];
+  const files = ["package.json", "extension.js", "request-gate.js", "snapshot.js", "icon.png"];
   for (const f of files) {
     const p = path.join(EXT_DIR, f);
     if (!fs.existsSync(p)) {

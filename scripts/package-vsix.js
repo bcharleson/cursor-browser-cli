@@ -12,7 +12,7 @@ const ROOT = path.resolve(__dirname, "..");
 const EXT = path.join(ROOT, "extension");
 const stage = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-browser-vsix-"));
 
-for (const file of ["package.json", "extension.js", "snapshot.js", "icon.png", ".vscodeignore"]) {
+for (const file of ["package.json", "extension.js", "request-gate.js", "snapshot.js", "icon.png", ".vscodeignore"]) {
   fs.copyFileSync(path.join(EXT, file), path.join(stage, file));
 }
 fs.copyFileSync(path.join(ROOT, "LICENSE"), path.join(stage, "LICENSE"));

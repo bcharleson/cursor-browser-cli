@@ -103,7 +103,9 @@ cursor-browser windows           # must list live project ports + versions
 1. Prunes dead `instances.json` / port files  
 2. Writes `~/.cursor-browser-cli/request-restart` (extension watches + polls → `restartServer()`)  
 3. If still down and Cursor hosts are running: writes `request-reload` (extension reloads window → re-activate)  
-4. Waits until a bridge port answers  
+4. Waits until a bridge port answers, then deletes the request files  
+
+Each window handles a reload token once. The extension records that token on disk before it reloads, because a window reload clears in-memory state. A request file older than 60 seconds is deleted and ignored, so a leftover file cannot reload Cursor in a loop. `doctor` and `recover` also delete those aged files, and `recover` deletes its own request files on the way out even if it fails.
 
 If the extension is not loaded at all, recover cannot start the server from outside Cursor — run once:
 
@@ -616,6 +618,7 @@ That continuity is the whole point of this tool.
 | Symptom | Fix |
 |---------|-----|
 | Connection refused / empty `windows` | **`cursor-browser doctor`** then **`cursor-browser recover`**. Clears stale ports, asks extension to restart (file trigger), optionally reloads Cursor. Browser Tab open ≠ bridge up. |
+| Cursor windows reload in a loop | Update to extension **1.3.4** or newer. Until then, delete `~/.cursor-browser-cli/request-reload`. Builds before 1.3.4 treat that leftover file as a new request after every reload. |
 | After reboot bridge dead | Extension host did not re-bind HTTP. `recover` → wait → `windows`. Ensure **Cursor Browser CLI** extension is Enabled. |
 | Wrong project / wrong app | `cursor-browser windows` → `pin` → `--workspace <name>` or `eval $(cursor-browser pin --export)` |
 | Multiple windows; cannot guess | Pass `--workspace` / MCP `workspace`; CLI and MCP fail closed |
@@ -681,7 +684,7 @@ Extension id: `bcharleson.cursor-browser-cli`.
 1. Create an Eclipse account and claim the **bcharleson** namespace at [open-vsx.org](https://open-vsx.org). Set the namespace display name to **B. Charleson**. That name is what Cursor shows under the extension title. The id stays `bcharleson`.
 2. Create an access token there.
 3. From this repo: `npm run package:vsix`
-4. Publish that file: `npx ovsx publish cursor-browser-cli-1.3.0.vsix -p "$OVSX_PAT"`
+4. Publish that file: `npx ovsx publish cursor-browser-cli-<version>.vsix -p "$OVSX_PAT"`
 5. In Cursor, search **Cursor Browser CLI**. The row should show this icon and the publisher **bcharleson**.
 
 The Visual Studio Marketplace is a separate account (publisher id `bcharleson`, a PAT). Publish there only after Open VSX is live, with the same version. VS Code users still do not get a Browser Tab.

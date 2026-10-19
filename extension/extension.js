@@ -17,6 +17,8 @@ const LEGACY_PORT_FILE = path.join(os.homedir(), ".cursor-browser-bridge", "port
 const LOG_FILE = path.join(STATE_DIR, "bridge.log");
 const REQUEST_RESTART_FILE = path.join(STATE_DIR, "request-restart");
 const REQUEST_RELOAD_FILE = path.join(STATE_DIR, "request-reload");
+const SEEN_RELOADS_FILE = path.join(STATE_DIR, "seen-reloads.json");
+const gate = require("./request-gate");
 const BASE_PORT = 17373;
 const MAX_PORT_TRIES = 32;
 const VERSION = require("./package.json").version;
@@ -32,7 +34,10 @@ let statusBar = null;
 let activePort = null;
 let instanceId = null;
 let SNAPSHOT_JS = null;
-/** Multi-window: each host handles a request token once; CLI deletes files after wait. */
+/**
+ * Per host, for the current process only. A reload token is also written to
+ * seen-reloads.json before reloadWindow, because this memory does not survive it.
+ */
 let lastRestartToken = null;
 let lastReloadToken = null;
 
@@ -69,11 +74,66 @@ function readInstances() {
   }
 }
 
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** One shared temp name races: another window renames it first and this rename throws ENOENT. */
 function writeInstances(map) {
   fs.mkdirSync(STATE_DIR, { recursive: true });
-  const tmp = INSTANCES_FILE + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(map, null, 2));
-  fs.renameSync(tmp, INSTANCES_FILE);
+  const tmp = `${INSTANCES_FILE}.${process.pid}.${process.hrtime.bigint().toString(36)}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(map, null, 2));
+    fs.renameSync(tmp, INSTANCES_FILE);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* another writer may already have renamed it */
+    }
+    throw err;
+  }
+}
+
+function withStateLock(fn) {
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  const lock = INSTANCES_FILE + ".lock";
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    let fd;
+    try {
+      fd = fs.openSync(lock, "wx");
+    } catch (err) {
+      if (!err || err.code !== "EEXIST") throw err;
+      let stale = true;
+      try {
+        stale = Date.now() - fs.statSync(lock).mtimeMs > 5000;
+      } catch {
+        stale = true;
+      }
+      if (stale) {
+        try {
+          fs.unlinkSync(lock);
+        } catch {
+          /* the holder released it */
+        }
+        continue;
+      }
+      if (Date.now() > deadline) throw err;
+      sleepMs(20);
+      continue;
+    }
+    try {
+      return fn();
+    } finally {
+      fs.closeSync(fd);
+      try {
+        fs.unlinkSync(lock);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 }
 
 function registerInstance(port) {
@@ -81,33 +141,35 @@ function registerInstance(port) {
   instanceId =
     instanceId ||
     `w-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-  const map = readInstances();
-  for (const [id, inst] of Object.entries(map)) {
-    if (
-      inst.primaryPath &&
-      info.primaryPath &&
-      path.resolve(inst.primaryPath) === path.resolve(info.primaryPath) &&
-      id !== instanceId
-    ) {
-      delete map[id];
-    }
-    if (inst.pid && inst.pid !== process.pid) {
-      try {
-        process.kill(inst.pid, 0);
-      } catch {
+  withStateLock(() => {
+    const map = readInstances();
+    for (const [id, inst] of Object.entries(map)) {
+      if (
+        inst.primaryPath &&
+        info.primaryPath &&
+        path.resolve(inst.primaryPath) === path.resolve(info.primaryPath) &&
+        id !== instanceId
+      ) {
         delete map[id];
       }
+      if (inst.pid && inst.pid !== process.pid) {
+        try {
+          process.kill(inst.pid, 0);
+        } catch {
+          delete map[id];
+        }
+      }
     }
-  }
-  map[instanceId] = {
-    id: instanceId,
-    port,
-    pid: process.pid,
-    updatedAt: new Date().toISOString(),
-    version: VERSION,
-    ...info,
-  };
-  writeInstances(map);
+    map[instanceId] = {
+      id: instanceId,
+      port,
+      pid: process.pid,
+      updatedAt: new Date().toISOString(),
+      version: VERSION,
+      ...info,
+    };
+    writeInstances(map);
+  });
   fs.writeFileSync(PORT_FILE, String(port));
   // legacy path for any old tooling
   try {
@@ -122,9 +184,11 @@ function registerInstance(port) {
 function unregisterInstance() {
   if (!instanceId) return;
   try {
-    const map = readInstances();
-    delete map[instanceId];
-    writeInstances(map);
+    withStateLock(() => {
+      const map = readInstances();
+      delete map[instanceId];
+      writeInstances(map);
+    });
   } catch {
     /* ignore */
   }
@@ -1415,7 +1479,11 @@ function startServer(port) {
     s.on("error", reject);
     s.listen(port, "127.0.0.1", () => {
       activePort = port;
-      registerInstance(port);
+      try {
+        registerInstance(port);
+      } catch (err) {
+        log("registerInstance failed", err && err.message ? err.message : err);
+      }
       log("listening", port);
       resolve(s);
     });
@@ -1489,49 +1557,110 @@ async function restartServer() {
 }
 
 /**
- * Read a CLI request file. Content is JSON `{ token, at, kind }` (or plain text token).
- * IMPORTANT: do NOT unlink here — every Cursor window must observe the same token.
- * The CLI clears request files after its wait window.
+ * Read a CLI request file. Content is JSON `{ token, at, kind }` (or a plain token).
+ * Do not unlink a fresh file here — every Cursor window must observe the same token.
+ * The CLI deletes the files after its wait. A file older than REQUEST_MAX_AGE_MS
+ * is a leftover and is removed here so it cannot reload the window on next launch.
  */
-function readRequestToken(file) {
+function inspectRequest(file) {
   try {
     if (!fs.existsSync(file)) return null;
-    const raw = fs.readFileSync(file, "utf8").trim();
-    if (!raw) {
-      // empty touch still counts — use mtime as token
-      return `mtime:${fs.statSync(file).mtimeMs}`;
-    }
-    try {
-      const j = JSON.parse(raw);
-      if (j && (j.token || j.at)) return String(j.token || j.at);
-    } catch {
-      /* plain token */
-    }
-    return raw;
+    const st = fs.statSync(file);
+    const raw = fs.readFileSync(file, "utf8");
+    return {
+      token: gate.readTokenFromRaw(raw, st.mtimeMs),
+      ageMs: gate.requestAgeMs(raw, st.mtimeMs),
+    };
   } catch {
     return null;
   }
 }
 
+function dropRequestFile(file) {
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    /* another window already removed it */
+  }
+}
+
+function readSeenReloads() {
+  try {
+    return JSON.parse(fs.readFileSync(SEEN_RELOADS_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function persistReloadToken(token) {
+  const primaryPath = workspaceInfo().primaryPath;
+  withStateLock(() => {
+    const next = gate.rememberReload(readSeenReloads(), primaryPath, token);
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    const tmp = `${SEEN_RELOADS_FILE}.${process.pid}.${process.hrtime.bigint().toString(36)}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(next));
+    fs.renameSync(tmp, SEEN_RELOADS_FILE);
+  });
+}
+
+function loadSeenReloadToken() {
+  return gate.rememberedReload(readSeenReloads(), workspaceInfo().primaryPath);
+}
+
 function consumeCliRequests() {
   try {
-    const reloadToken = readRequestToken(REQUEST_RELOAD_FILE);
-    if (reloadToken && reloadToken !== lastReloadToken) {
-      lastReloadToken = reloadToken;
-      log("request-reload received", reloadToken.slice(0, 48));
-      // Full window reload re-activates extension with latest disk code
-      vscode.commands.executeCommand("workbench.action.reloadWindow");
-      return "reload";
+    const reload = inspectRequest(REQUEST_RELOAD_FILE);
+    if (reload) {
+      const decision = gate.decideRequest({
+        token: reload.token,
+        lastToken: lastReloadToken,
+        ageMs: reload.ageMs,
+      });
+      if (decision === "drop") {
+        log(
+          "request-reload dropped, stale",
+          `${Math.round((reload.ageMs || 0) / 1000)}s`
+        );
+        dropRequestFile(REQUEST_RELOAD_FILE);
+      } else if (decision === "handle") {
+        // Persist before reloadWindow. The next host has empty memory.
+        try {
+          persistReloadToken(reload.token);
+        } catch (err) {
+          log(
+            "request-reload not persisted, skipping reload",
+            err && err.message ? err.message : err
+          );
+          return null;
+        }
+        lastReloadToken = reload.token;
+        log("request-reload received", String(reload.token).slice(0, 48));
+        vscode.commands.executeCommand("workbench.action.reloadWindow");
+        return "reload";
+      }
     }
 
-    const restartToken = readRequestToken(REQUEST_RESTART_FILE);
-    if (restartToken && restartToken !== lastRestartToken) {
-      lastRestartToken = restartToken;
-      log("request-restart received", restartToken.slice(0, 48));
-      restartServer().catch((e) =>
-        log("request-restart failed", e && e.message ? e.message : e)
-      );
-      return "restart";
+    const restart = inspectRequest(REQUEST_RESTART_FILE);
+    if (restart) {
+      const decision = gate.decideRequest({
+        token: restart.token,
+        lastToken: lastRestartToken,
+        ageMs: restart.ageMs,
+      });
+      if (decision === "drop") {
+        log(
+          "request-restart dropped, stale",
+          `${Math.round((restart.ageMs || 0) / 1000)}s`
+        );
+        dropRequestFile(REQUEST_RESTART_FILE);
+      } else if (decision === "handle") {
+        lastRestartToken = restart.token;
+        log("request-restart received", String(restart.token).slice(0, 48));
+        restartServer().catch((e) =>
+          log("request-restart failed", e && e.message ? e.message : e)
+        );
+        return "restart";
+      }
     }
   } catch (e) {
     log("request poll error", e && e.message ? e.message : e);
@@ -1606,6 +1735,8 @@ async function activate(context) {
 
   // CLI self-heal: file triggers only (no UI automation)
   fs.mkdirSync(STATE_DIR, { recursive: true });
+  // A reload token handled by the previous host of this same window.
+  lastReloadToken = loadSeenReloadToken();
   // Drain any request left from before activate (multi-window reload race)
   try {
     consumeCliRequests();

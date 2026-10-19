@@ -8,6 +8,7 @@ const os = require("os");
 const path = require("path");
 const http = require("http");
 const { execSync } = require("child_process");
+const { REQUEST_MAX_AGE_MS, requestAgeMs } = require("../extension/request-gate");
 
 const STATE_DIR = path.join(os.homedir(), ".cursor-browser-cli");
 const INSTANCES_FILE = path.join(STATE_DIR, "instances.json");
@@ -590,10 +591,26 @@ function pendingRequestAgeMs(file) {
   try {
     if (!fs.existsSync(file)) return null;
     const st = fs.statSync(file);
-    return Date.now() - st.mtimeMs;
+    return requestAgeMs(fs.readFileSync(file, "utf8"), st.mtimeMs);
   } catch {
     return null;
   }
+}
+
+/** Drop request files the extension must not act on. Fresh tokens are left for every window. */
+function clearAgedRequestFiles(maxAgeMs = REQUEST_MAX_AGE_MS) {
+  const removed = [];
+  for (const file of [REQUEST_RESTART_FILE, REQUEST_RELOAD_FILE]) {
+    const age = pendingRequestAgeMs(file);
+    if (age == null || (age <= maxAgeMs && age >= -maxAgeMs)) continue;
+    try {
+      fs.unlinkSync(file);
+      removed.push(path.basename(file));
+    } catch {
+      /* ignore */
+    }
+  }
+  return removed;
 }
 
 async function probeLiveVersions() {
@@ -631,6 +648,7 @@ function versionSkew(probed, expected = CLI_VERSION) {
 
 async function runDoctor({ asJson = false } = {}) {
   pruneStaleRegistry();
+  const droppedRequests = clearAgedRequestFiles();
   const portsLive = [];
   for (let p = DEFAULT_PORT; p < DEFAULT_PORT + 32; p++) {
     if (portIsAlive(p)) portsLive.push(p);
@@ -671,7 +689,9 @@ async function runDoctor({ asJson = false } = {}) {
         return null;
       }
     })(),
-    diagnosis: [],
+    diagnosis: droppedRequests.length
+      ? [`Removed stale request file(s): ${droppedRequests.join(", ")}`]
+      : [],
     fix: [],
     selfHeal: {
       method: "extension-file-trigger + multi-window tokens + heartbeat",
@@ -761,117 +781,125 @@ async function runRecover({
   const triggers = [];
   void workspaceHint; // reserved for future workspace-scoped triggers
 
+  steps.push("clear-aged-requests");
+  const droppedRequests = clearAgedRequestFiles();
+  if (droppedRequests.length) {
+    steps.push(`dropped:${droppedRequests.join(",")}`);
+  }
   steps.push("clear-stale-state");
   clearStaleState();
 
   let live = [];
 
-  if (forceReload) {
-    // Code update path: HTTP restart cannot swap loaded extension JS
-    steps.push("write-request-reload");
-    const { file, token } = writeRestartRequest("reload");
-    triggers.push({
-      ok: true,
-      how: "file-request-reload",
-      path: file,
-      token,
-      note: "Every extension host reloads once per token (multi-window safe on 1.2.2+)",
-    });
-    steps.push("wait-for-bridge-15s-after-reload");
-    live = await waitForBridge(15000);
-
-    // Probe versions early — pre-1.2.2 hosts delete the reload file after first window
-    let earlyBridges = [];
-    try {
-      earlyBridges = await probeLiveVersions();
-    } catch {
-      /* ignore */
-    }
-    let earlySkew = versionSkew(earlyBridges);
-    if (
-      earlySkew.stale.length > 0 ||
-      !earlyBridges.length ||
-      earlyBridges.every((b) => b.version !== CLI_VERSION)
-    ) {
-      // Last resort: recycle user extension hosts so Cursor reloads extension JS from disk
-      steps.push("recycle-user-extension-hosts");
-      const killed = recycleUserExtensionHosts();
-      triggers.push({
-        ok: true,
-        how: "sigterm-user-extension-hosts",
-        killed,
-        note: "No UI automation — Cursor respawns hosts and re-activates from disk",
-      });
-      // Leave a restart token for hosts as they come back
-      writeRestartRequest("restart");
-      steps.push("wait-for-bridge-30s-after-recycle");
-      live = await waitForBridge(30000);
-    } else {
-      steps.push("write-request-restart-after-reload");
-      const r2 = writeRestartRequest("restart");
-      triggers.push({
-        ok: true,
-        how: "file-request-restart-after-reload",
-        token: r2.token,
-      });
-      steps.push("wait-for-bridge-10s");
-      live = await waitForBridge(10000);
-    }
-  } else {
-    steps.push("write-request-restart");
-    const r1 = writeRestartRequest("restart");
-    triggers.push({
-      ok: true,
-      how: "file-request-restart",
-      path: r1.file,
-      token: r1.token,
-      note: "Every extension host restarts HTTP once per token (multi-window safe)",
-    });
-
-    if (!cursorRunning()) {
-      steps.push("cursor-not-running");
-    }
-
-    steps.push("wait-for-bridge-10s");
-    live = await waitForBridge(10000);
-
-    if (!live.length) {
-      steps.push("write-request-restart-retry");
-      const rRetry = writeRestartRequest("restart");
-      triggers.push({
-        ok: true,
-        how: "file-request-restart-retry",
-        token: rRetry.token,
-      });
-      steps.push("wait-for-bridge-10s-retry");
-      live = await waitForBridge(10000);
-    }
-
-    if (!live.length && cursorRunning()) {
+  try {
+    if (forceReload) {
+      // Code update path: HTTP restart cannot swap loaded extension JS
       steps.push("write-request-reload");
-      const rReload = writeRestartRequest("reload");
+      const { file, token } = writeRestartRequest("reload");
       triggers.push({
         ok: true,
         how: "file-request-reload",
-        path: rReload.file,
-        token: rReload.token,
-        note: "Extension executes workbench.action.reloadWindow then rebinds port",
+        path: file,
+        token,
+        note: "Every extension host reloads once per token (multi-window safe on 1.2.2+)",
       });
-      steps.push("wait-for-bridge-25s-after-reload");
-      live = await waitForBridge(25000);
-    }
+      steps.push("wait-for-bridge-15s-after-reload");
+      live = await waitForBridge(15000);
 
-    if (!live.length) {
-      steps.push("write-request-restart-final");
-      writeRestartRequest("restart");
-      live = await waitForBridge(8000);
+      // Probe versions early — pre-1.2.2 hosts delete the reload file after first window
+      let earlyBridges = [];
+      try {
+        earlyBridges = await probeLiveVersions();
+      } catch {
+        /* ignore */
+      }
+      let earlySkew = versionSkew(earlyBridges);
+      if (
+        earlySkew.stale.length > 0 ||
+        !earlyBridges.length ||
+        earlyBridges.every((b) => b.version !== CLI_VERSION)
+      ) {
+        // Last resort: recycle user extension hosts so Cursor reloads extension JS from disk
+        steps.push("recycle-user-extension-hosts");
+        const killed = recycleUserExtensionHosts();
+        triggers.push({
+          ok: true,
+          how: "sigterm-user-extension-hosts",
+          killed,
+          note: "No UI automation — Cursor respawns hosts and re-activates from disk",
+        });
+        // Leave a restart token for hosts as they come back
+        writeRestartRequest("restart");
+        steps.push("wait-for-bridge-30s-after-recycle");
+        live = await waitForBridge(30000);
+      } else {
+        steps.push("write-request-restart-after-reload");
+        const r2 = writeRestartRequest("restart");
+        triggers.push({
+          ok: true,
+          how: "file-request-restart-after-reload",
+          token: r2.token,
+        });
+        steps.push("wait-for-bridge-10s");
+        live = await waitForBridge(10000);
+      }
+    } else {
+      steps.push("write-request-restart");
+      const r1 = writeRestartRequest("restart");
+      triggers.push({
+        ok: true,
+        how: "file-request-restart",
+        path: r1.file,
+        token: r1.token,
+        note: "Every extension host restarts HTTP once per token (multi-window safe)",
+      });
+
+      if (!cursorRunning()) {
+        steps.push("cursor-not-running");
+      }
+
+      steps.push("wait-for-bridge-10s");
+      live = await waitForBridge(10000);
+
+      if (!live.length) {
+        steps.push("write-request-restart-retry");
+        const rRetry = writeRestartRequest("restart");
+        triggers.push({
+          ok: true,
+          how: "file-request-restart-retry",
+          token: rRetry.token,
+        });
+        steps.push("wait-for-bridge-10s-retry");
+        live = await waitForBridge(10000);
+      }
+
+      if (!live.length && cursorRunning()) {
+        steps.push("write-request-reload");
+        const rReload = writeRestartRequest("reload");
+        triggers.push({
+          ok: true,
+          how: "file-request-reload",
+          path: rReload.file,
+          token: rReload.token,
+          note: "Extension executes workbench.action.reloadWindow then rebinds port",
+        });
+        steps.push("wait-for-bridge-25s-after-reload");
+        live = await waitForBridge(25000);
+      }
+
+      if (!live.length) {
+        steps.push("write-request-restart-final");
+        writeRestartRequest("restart");
+        live = await waitForBridge(8000);
+      }
     }
+  } finally {
+    // Always delete triggers, including when recover throws or the process is
+    // about to exit. A leftover request-reload reloads every Cursor window.
+    await new Promise((r) => setTimeout(r, 1500));
+    steps.push("clear-request-files");
+    clearRequestFiles();
   }
-
-  // Give multi-window hosts a moment after last write, then clear triggers
-  await new Promise((r) => setTimeout(r, 1500));
-  steps.push("clear-request-files");
-  clearRequestFiles();
 
   // Re-probe versions when possible
   let bridges = [];
