@@ -91,21 +91,23 @@ The CLI talks to a **localhost HTTP bridge** started by the Cursor extension. Th
 
 ```bash
 cursor-browser ensure            # setup + doctor + heal + verify (preferred)
-cursor-browser ensure --reload   # after upgrades — multi-window extension code reload
+cursor-browser ensure --reload   # only when agents are idle: reload all windows
 cursor-browser doctor            # ports, extension, version skew, stale state
 cursor-browser recover           # self-heal: multi-window restart tokens + wait
-cursor-browser recover --reload  # force all windows to reload extension code
+cursor-browser recover --reload  # only when agents are idle: reload all windows
 cursor-browser windows           # must list live project ports + versions
 ```
 
-`recover` / `ensure` are safe to run from Grok/Claude/Codex when you see `ECONNREFUSED`. They self-heal with file triggers only:
+`recover` / `ensure` repair the HTTP bridge with file triggers when you see `ECONNREFUSED`:
 
 1. Prunes dead `instances.json` / port files  
 2. Writes `~/.cursor-browser-cli/request-restart` (extension watches + polls → `restartServer()`)  
-3. If still down and Cursor hosts are running: writes `request-reload` (extension reloads window → re-activate)  
+3. If still down, reports the failure without reloading windows
 4. Waits until a bridge port answers, then deletes the request files  
 
 Each window handles a reload token once. The extension records that token on disk before it reloads, because a window reload clears in-memory state. A request file older than 60 seconds is deleted and ignored, so a leftover file cannot reload Cursor in a loop. `doctor` and `recover` also delete those aged files, and `recover` deletes its own request files on the way out even if it fails.
+
+Starting with 1.3.5, recovery never terminates extension hosts. Window reloads require an explicit `--reload`; version skew alone does not trigger one. A window reload can interrupt agents, so wait until they are idle. Installing new files does not mean every open window has activated them: `ensure` reports pending versions until a normal or explicitly requested reload.
 
 If the extension is not loaded at all, recover cannot start the server from outside Cursor — run once:
 
@@ -618,7 +620,7 @@ That continuity is the whole point of this tool.
 | Symptom | Fix |
 |---------|-----|
 | Connection refused / empty `windows` | **`cursor-browser doctor`** then **`cursor-browser recover`**. Clears stale ports, asks extension to restart (file trigger), optionally reloads Cursor. Browser Tab open ≠ bridge up. |
-| Cursor windows reload in a loop | Update to extension **1.3.4** or newer. Until then, delete `~/.cursor-browser-cli/request-reload`. Builds before 1.3.4 treat that leftover file as a new request after every reload. |
+| Cursor windows reload in a loop | Update to extension **1.3.5** or newer. Until then, delete `~/.cursor-browser-cli/request-reload`. Builds before 1.3.4 treat that leftover file as a new request after every reload. |
 | After reboot bridge dead | Extension host did not re-bind HTTP. `recover` → wait → `windows`. Ensure **Cursor Browser CLI** extension is Enabled. |
 | Wrong project / wrong app | `cursor-browser windows` → `pin` → `--workspace <name>` or `eval $(cursor-browser pin --export)` |
 | Multiple windows; cannot guess | Pass `--workspace` / MCP `workspace`; CLI and MCP fail closed |

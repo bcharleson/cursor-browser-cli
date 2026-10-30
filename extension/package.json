@@ -2,7 +2,7 @@
   "name": "cursor-browser-cli",
   "displayName": "Cursor Browser CLI",
   "description": "Drive Cursor's Browser Tab from any CLI or MCP",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "publisher": "bcharleson",
   "author": {
     "name": "B. Charleson"
